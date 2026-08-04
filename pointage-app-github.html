@@ -1,0 +1,1916 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Pointage — Habitation Ressource</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+// ---------- Stockage local (remplace window.storage de Claude) ----------
+window.storage = {
+  async get(key, shared) {
+    const k = (shared ? "shared:" : "personal:") + key;
+    const v = localStorage.getItem(k);
+    if (v === null) return null;
+    return { key, value: v, shared: !!shared };
+  },
+  async set(key, value, shared) {
+    const k = (shared ? "shared:" : "personal:") + key;
+    localStorage.setItem(k, value);
+    return { key, value, shared: !!shared };
+  },
+  async delete(key, shared) {
+    const k = (shared ? "shared:" : "personal:") + key;
+    localStorage.removeItem(k);
+    return { key, deleted: true, shared: !!shared };
+  },
+  async list(prefix, shared) {
+    const base = shared ? "shared:" : "personal:";
+    const pre = base + (prefix || "");
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith(pre)) keys.push(k.slice(base.length));
+    }
+    return { keys, prefix: prefix || "", shared: !!shared };
+  },
+};
+
+// ---------- Icônes simples (remplacent lucide-react, non nécessaire ici) ----------
+const mkIcon = (glyph) => ({ size = 16, className = "", style = {}, color, title } = {}) => (
+  <span
+    className={className}
+    title={title}
+    style={{ fontSize: size, lineHeight: 1, display: "inline-block", color, ...style }}
+  >
+    {glyph}
+  </span>
+);
+const Plus = mkIcon("+");
+const Trash2 = mkIcon("🗑");
+const Users = mkIcon("👥");
+const Users2 = mkIcon("👥");
+const ClipboardList = mkIcon("📋");
+const BarChart3 = mkIcon("📊");
+const Download = mkIcon("⬇");
+const Settings = mkIcon("⚙");
+const ChevronLeft = mkIcon("‹");
+const ChevronRight = mkIcon("›");
+const Loader2 = mkIcon("⏳");
+const TrendingUp = mkIcon("📈");
+const Wallet = mkIcon("💰");
+const Calculator = mkIcon("🧮");
+
+
+// ---------- Helpers ----------
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+const fmtDateLong = (iso) => {
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+};
+
+const fmtHours = (h) => {
+  const sign = h < 0 ? "-" : "";
+  h = Math.abs(h);
+  const hh = Math.floor(h);
+  const mm = Math.round((h - hh) * 60);
+  return `${sign}${hh}h${mm.toString().padStart(2, "0")}`;
+};
+
+const DEFAULT_TACHES = [
+  "Hangar",
+  "Coupe",
+  "Œil tonnage",
+  "Comptage",
+  "Coupe feuille",
+  "Engrais",
+  "Fumier",
+  "Plantations",
+  "Autre",
+];
+
+const PALETTE = {
+  bg: "#F5F1E6",
+  ink: "#26301F",
+  green: "#2E4A2F",
+  greenDark: "#1C2F1D",
+  yellow: "#E3AC2E",
+  rust: "#A64B2A",
+  line: "#D8CDAE",
+  card: "#FFFDF7",
+};
+
+// Seuils par défaut = Code du travail (à vérifier / ajuster selon avenants IDCC 9971)
+const DEFAULT_HS = {
+  seuilNormal: 35, // heures/semaine avant majoration
+  seuilMajo2: 43, // heures/semaine à partir desquelles la 2e majoration s'applique
+  tauxMajo1: 25, // % de la 36e à la 43e heure
+  tauxMajo2: 50, // % au-delà
+};
+
+// Lundi de la semaine ISO contenant la date donnée
+const weekStart = (iso) => {
+  const d = new Date(iso + "T00:00:00");
+  const day = d.getDay() || 7; // dimanche -> 7
+  if (day !== 1) d.setDate(d.getDate() - (day - 1));
+  return d.toISOString().slice(0, 10);
+};
+
+const weekLabel = (mondayISO) => {
+  const start = new Date(mondayISO + "T00:00:00");
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+  const fmt = (d) => d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+  return `Semaine du ${fmt(start)} au ${fmt(end)}`;
+};
+
+// Calcule la répartition heures normales / majorées 1 / majorées 2 pour un total hebdo payé
+const splitOvertime = (totalHeures, hs) => {
+  const s1 = Number(hs.seuilNormal);
+  const s2 = Number(hs.seuilMajo2);
+  const normales = Math.min(totalHeures, s1);
+  const majo1 = Math.max(0, Math.min(totalHeures, s2) - s1);
+  const majo2 = Math.max(0, totalHeures - s2);
+  return { normales, majo1, majo2 };
+};
+
+// ---------- Main App ----------
+function PointageApp() {
+  const [loading, setLoading] = useState(true);
+  const [employees, setEmployees] = useState([]);
+  const [teams, setTeams] = useState([]);
+  const [entries, setEntries] = useState([]);
+  const [transactions, setTransactions] = useState([]); // avances, acomptes, prêts, remboursements
+  const [tachesEcart, setTachesEcart] = useState([]); // tâches où heures effectives != heures payées
+  const [taches, setTaches] = useState(DEFAULT_TACHES);
+  const [heuresDefaut, setHeuresDefaut] = useState(7);
+  const [heuresSup, setHeuresSup] = useState(DEFAULT_HS);
+  const [tab, setTab] = useState("pointage");
+  const [selectedDate, setSelectedDate] = useState(todayISO());
+  const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
+
+  // ---------- Load from storage ----------
+  useEffect(() => {
+    (async () => {
+      try {
+        const [empRes, entRes, cfgRes, teamRes, txRes] = await Promise.allSettled([
+          window.storage.get("employees", false),
+          window.storage.get("entries", false),
+          window.storage.get("config", false),
+          window.storage.get("teams", false),
+          window.storage.get("transactions", false),
+        ]);
+        if (empRes.status === "fulfilled" && empRes.value) {
+          setEmployees(JSON.parse(empRes.value.value));
+        }
+        if (entRes.status === "fulfilled" && entRes.value) {
+          setEntries(JSON.parse(entRes.value.value));
+        }
+        if (teamRes.status === "fulfilled" && teamRes.value) {
+          setTeams(JSON.parse(teamRes.value.value));
+        }
+        if (txRes.status === "fulfilled" && txRes.value) {
+          setTransactions(JSON.parse(txRes.value.value));
+        }
+        if (cfgRes.status === "fulfilled" && cfgRes.value) {
+          const cfg = JSON.parse(cfgRes.value.value);
+          setTachesEcart(cfg.tachesEcart || []);
+          setHeuresSup({ ...DEFAULT_HS, ...(cfg.heuresSup || {}) });
+          setTaches(cfg.taches && cfg.taches.length > 0 ? cfg.taches : DEFAULT_TACHES);
+          setHeuresDefaut(cfg.heuresDefaut ?? 7);
+        }
+      } catch (e) {
+        console.error("Erreur de chargement", e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  // ---------- Persist ----------
+  const persist = async (key, value) => {
+    setSaveState("saving");
+    try {
+      await window.storage.set(key, JSON.stringify(value), false);
+      setSaveState("saved");
+      setTimeout(() => setSaveState("idle"), 1200);
+    } catch (e) {
+      console.error("Erreur de sauvegarde", e);
+      setSaveState("idle");
+    }
+  };
+
+  const updateEmployees = (next) => {
+    setEmployees(next);
+    persist("employees", next);
+  };
+
+  const updateEntries = (next) => {
+    setEntries(next);
+    persist("entries", next);
+  };
+
+  const updateTeams = (next) => {
+    setTeams(next);
+    persist("teams", next);
+  };
+
+  const updateTransactions = (next) => {
+    setTransactions(next);
+    persist("transactions", next);
+  };
+
+  const updateTachesEcart = (next) => {
+    setTachesEcart(next);
+    persist("config", { tachesEcart: next, heuresSup, taches, heuresDefaut });
+  };
+
+  const updateHeuresSup = (next) => {
+    setHeuresSup(next);
+    persist("config", { tachesEcart, heuresSup: next, taches, heuresDefaut });
+  };
+
+  const updateTaches = (next) => {
+    setTaches(next);
+    persist("config", { tachesEcart, heuresSup, taches: next, heuresDefaut });
+  };
+
+  const updateHeuresDefaut = (next) => {
+    setHeuresDefaut(next);
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut: next });
+  };
+
+  if (loading) {
+    return (
+      <div style={{ background: PALETTE.bg, minHeight: "100vh" }} className="flex items-center justify-center">
+        <Loader2 className="animate-spin" size={28} color={PALETTE.green} />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: PALETTE.bg, color: PALETTE.ink, minHeight: "100vh" }} className="font-sans">
+      <style>{`
+        .print-only { display: none; }
+        @media print {
+          .no-print { display: none !important; }
+          .print-only { display: block !important; }
+          body { background: white !important; }
+        }
+      `}</style>
+      <div className="no-print">
+        <Header saveState={saveState} />
+        <TabBar tab={tab} setTab={setTab} />
+      </div>
+      <main className="max-w-5xl mx-auto px-4 pb-24 pt-6">
+        {tab === "pointage" && (
+          <Pointage
+            employees={employees}
+            teams={teams}
+            entries={entries}
+            updateEntries={updateEntries}
+            tachesEcart={tachesEcart}
+            taches={taches}
+            heuresDefaut={heuresDefaut}
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+          />
+        )}
+        {tab === "salaries" && <Salaries employees={employees} updateEmployees={updateEmployees} />}
+        {tab === "equipes" && <Equipes employees={employees} teams={teams} updateTeams={updateTeams} />}
+        {tab === "avances" && (
+          <Avances employees={employees} transactions={transactions} updateTransactions={updateTransactions} />
+        )}
+        {tab === "recap" && <Recap employees={employees} entries={entries} />}
+        {tab === "heuresSup" && <HeuresSup employees={employees} entries={entries} heuresSup={heuresSup} />}
+        {tab === "simulation" && (
+          <SimulationPaie employees={employees} entries={entries} transactions={transactions} heuresSup={heuresSup} />
+        )}
+        {tab === "parametres" && (
+          <Parametres
+            tachesEcart={tachesEcart}
+            updateTachesEcart={updateTachesEcart}
+            heuresSup={heuresSup}
+            updateHeuresSup={updateHeuresSup}
+            taches={taches}
+            updateTaches={updateTaches}
+            heuresDefaut={heuresDefaut}
+            updateHeuresDefaut={updateHeuresDefaut}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ---------- Header ----------
+function Header({ saveState }) {
+  return (
+    <div style={{ background: PALETTE.greenDark }} className="text-white">
+      <div className="max-w-5xl mx-auto px-4 py-5 flex items-center justify-between">
+        <div>
+          <div style={{ letterSpacing: "0.12em", color: PALETTE.yellow }} className="text-xs uppercase font-semibold">
+            Carnet de pointage
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight mt-0.5">Habitation Ressource</h1>
+        </div>
+        <div className="text-xs opacity-70 h-4">
+          {saveState === "saving" && "Enregistrement…"}
+          {saveState === "saved" && "Enregistré ✓"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Tabs ----------
+function TabBar({ tab, setTab }) {
+  const items = [
+    { id: "pointage", label: "Pointage", icon: ClipboardList },
+    { id: "salaries", label: "Salariés", icon: Users },
+    { id: "equipes", label: "Équipes", icon: Users2 },
+    { id: "avances", label: "Avances", icon: Wallet },
+    { id: "recap", label: "Récapitulatif", icon: BarChart3 },
+    { id: "heuresSup", label: "Heures sup", icon: TrendingUp },
+    { id: "simulation", label: "Simulation paie", icon: Calculator },
+    { id: "parametres", label: "Paramètres", icon: Settings },
+  ];
+  return (
+    <div style={{ borderBottom: `1px solid ${PALETTE.line}`, background: PALETTE.card }}>
+      <div className="max-w-5xl mx-auto px-4 flex gap-1 overflow-x-auto">
+        {items.map(({ id, label, icon: Icon }) => {
+          const active = tab === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className="flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors whitespace-nowrap"
+              style={{
+                borderBottom: active ? `3px solid ${PALETTE.green}` : "3px solid transparent",
+                color: active ? PALETTE.green : "#8A8271",
+              }}
+            >
+              <Icon size={16} />
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Pointage (daily entry by supervisor) ----------
+function Pointage({ employees, teams, entries, updateEntries, tachesEcart, taches, heuresDefaut, selectedDate, setSelectedDate }) {
+  const dayEntries = entries.filter((e) => e.date === selectedDate);
+  const [selected, setSelected] = useState([]);
+  const [bulkTache, setBulkTache] = useState(taches[0]);
+  const [bulkEff, setBulkEff] = useState(heuresDefaut);
+  const [bulkPaye, setBulkPaye] = useState(heuresDefaut);
+  const [bulkParcelle, setBulkParcelle] = useState("");
+
+  // La sélection est propre à chaque jour affiché
+  useEffect(() => {
+    setSelected([]);
+  }, [selectedDate]);
+
+  const shiftDate = (delta) => {
+    const d = new Date(selectedDate + "T00:00:00");
+    d.setDate(d.getDate() + delta);
+    setSelectedDate(d.toISOString().slice(0, 10));
+  };
+
+  const rowFor = (empId) => dayEntries.find((e) => e.employeeId === empId);
+
+  const setRow = (empId, patch) => {
+    const existing = rowFor(empId);
+    let next;
+    if (existing) {
+      const merged = { ...existing, ...patch };
+      // si la tâche change et n'est plus une tâche à écart, aligner heures payées sur heures effectives
+      if (!tachesEcart.includes(merged.tache)) {
+        merged.heuresPayees = merged.heuresEffectives;
+      }
+      next = entries.map((e) => (e.id === existing.id ? merged : e));
+    } else {
+      const base = {
+        id: uid(),
+        date: selectedDate,
+        employeeId: empId,
+        present: true,
+        heuresEffectives: heuresDefaut,
+        heuresPayees: heuresDefaut,
+        tache: taches[0],
+        parcelle: "",
+        note: "",
+        ...patch,
+      };
+      if (!tachesEcart.includes(base.tache)) base.heuresPayees = base.heuresEffectives;
+      next = [...entries, base];
+    }
+    updateEntries(next);
+  };
+
+  const togglePresent = (empId) => {
+    const existing = rowFor(empId);
+    if (existing) {
+      setRow(empId, { present: !existing.present });
+    } else {
+      setRow(empId, { present: true });
+    }
+  };
+
+  const toggleSelected = (empId) => {
+    setSelected((prev) => (prev.includes(empId) ? prev.filter((id) => id !== empId) : [...prev, empId]));
+  };
+
+  const selectTeam = (team) => {
+    setSelected(team.employeeIds);
+    setBulkTache(taches[0]);
+  };
+
+  const bulkSeparee = tachesEcart.includes(bulkTache);
+
+  const applyBulk = () => {
+    let next = entries;
+    selected.forEach((empId) => {
+      const existing = next.find((e) => e.date === selectedDate && e.employeeId === empId);
+      const patch = {
+        present: true,
+        tache: bulkTache,
+        heuresEffectives: bulkEff,
+        heuresPayees: bulkSeparee ? bulkPaye : bulkEff,
+        parcelle: bulkParcelle,
+      };
+      if (existing) {
+        next = next.map((e) => (e.id === existing.id ? { ...e, ...patch } : e));
+      } else {
+        next = [
+          ...next,
+          { id: uid(), date: selectedDate, employeeId: empId, note: "", ...patch },
+        ];
+      }
+    });
+    updateEntries(next);
+    setSelected([]);
+    setBulkParcelle("");
+  };
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés » pour commencer le pointage." />;
+  }
+
+  const totalPresents = dayEntries.filter((e) => e.present).length;
+  const totalEff = dayEntries.filter((e) => e.present).reduce((s, e) => s + Number(e.heuresEffectives || 0), 0);
+  const totalPaye = dayEntries.filter((e) => e.present).reduce((s, e) => s + Number(e.heuresPayees ?? e.heuresEffectives ?? 0), 0);
+
+  return (
+    <div>
+      {/* Date navigator */}
+      <div className="flex items-center justify-between mb-5">
+        <button onClick={() => shiftDate(-1)} className="p-2 rounded-full hover:bg-black/5">
+          <ChevronLeft size={20} />
+        </button>
+        <div className="text-center">
+          <div className="font-semibold text-lg capitalize">{fmtDateLong(selectedDate)}</div>
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+            className="text-xs mt-1 bg-transparent underline decoration-dotted"
+            style={{ color: "#8A8271" }}
+          />
+        </div>
+        <button onClick={() => shiftDate(1)} className="p-2 rounded-full hover:bg-black/5">
+          <ChevronRight size={20} />
+        </button>
+      </div>
+
+      <div className="flex gap-4 text-sm mb-4 flex-wrap" style={{ color: "#6B6552" }}>
+        <span>
+          <strong style={{ color: PALETTE.green }}>{totalPresents}</strong> présent(s)
+        </span>
+        <span>
+          Effectives : <strong style={{ color: PALETTE.green }}>{fmtHours(totalEff)}</strong>
+        </span>
+        <span>
+          Payées : <strong style={{ color: PALETTE.rust }}>{fmtHours(totalPaye)}</strong>
+        </span>
+      </div>
+
+      {teams.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          <span className="text-xs" style={{ color: "#8A8271" }}>
+            Sélectionner une équipe :
+          </span>
+          {teams.map((team) => (
+            <button
+              key={team.id}
+              onClick={() => selectTeam(team)}
+              className="px-3 py-1.5 rounded-full text-xs border"
+              style={{ borderColor: PALETTE.green, color: PALETTE.green, background: "#fff" }}
+            >
+              {team.nom} ({team.employeeIds.length})
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selected.length > 0 && (
+        <div
+          style={{ background: "#EFEADA", border: `1px solid ${PALETTE.green}` }}
+          className="rounded-md p-3 mb-4 flex items-center gap-2 flex-wrap"
+        >
+          <span className="text-sm font-medium" style={{ color: PALETTE.greenDark }}>
+            {selected.length} sélectionné(s)
+          </span>
+          <select
+            value={bulkTache}
+            onChange={(e) => setBulkTache(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm min-w-[160px]"
+            style={{ borderColor: PALETTE.line, background: "#fff" }}
+          >
+            {taches.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            step="0.25"
+            min="0"
+            value={bulkEff}
+            onChange={(e) => setBulkEff(e.target.value)}
+            className="w-20 px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line, background: "#fff" }}
+            title="Heures effectives"
+          />
+          {bulkSeparee && (
+            <input
+              type="number"
+              step="0.25"
+              min="0"
+              value={bulkPaye}
+              onChange={(e) => setBulkPaye(e.target.value)}
+              className="w-20 px-2 py-1.5 rounded border text-sm"
+              style={{ borderColor: PALETTE.rust, background: "#FBF0E9" }}
+              title="Heures payées"
+            />
+          )}
+          <input
+            type="text"
+            placeholder="Parcelle"
+            value={bulkParcelle}
+            onChange={(e) => setBulkParcelle(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm w-28"
+            style={{ borderColor: PALETTE.line, background: "#fff" }}
+          />
+          <button
+            onClick={applyBulk}
+            style={{ background: PALETTE.green }}
+            className="px-4 py-1.5 rounded text-white text-sm font-medium"
+          >
+            Appliquer
+          </button>
+          <button onClick={() => setSelected([])} className="text-sm" style={{ color: "#8A8271" }}>
+            Annuler
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {employees.map((emp) => {
+          const row = rowFor(emp.id);
+          const present = row ? row.present : false;
+          const tache = row?.tache ?? taches[0];
+          const separee = tachesEcart.includes(tache);
+          const isSelected = selected.includes(emp.id);
+          return (
+            <div
+              key={emp.id}
+              style={{
+                background: isSelected ? "#EFEADA" : PALETTE.card,
+                border: `1px solid ${isSelected ? PALETTE.green : PALETTE.line}`,
+                borderLeft: `4px solid ${present ? PALETTE.green : "#D8CDAE"}`,
+              }}
+              className="rounded-md p-3"
+            >
+              <div className="flex items-center gap-3 flex-wrap">
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => toggleSelected(emp.id)}
+                  className="w-4 h-4 shrink-0"
+                  style={{ accentColor: PALETTE.green }}
+                  title="Sélectionner pour un pointage groupé"
+                />
+                <button
+                  onClick={() => togglePresent(emp.id)}
+                  className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-white font-bold text-xs transition-colors"
+                  style={{ background: present ? PALETTE.green : "#C9C2AC" }}
+                  title={present ? "Présent — cliquer pour marquer absent" : "Absent — cliquer pour marquer présent"}
+                >
+                  {present ? "✓" : ""}
+                </button>
+                <div className="min-w-[140px] font-medium">{emp.nom}</div>
+
+                {present && (
+                  <>
+                    <select
+                      value={tache}
+                      onChange={(e) => setRow(emp.id, { tache: e.target.value })}
+                      className="px-2 py-1.5 rounded border text-sm min-w-[170px]"
+                      style={{ borderColor: PALETTE.line, background: "#fff" }}
+                    >
+                      {taches.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                          {tachesEcart.includes(t) ? " ⚑" : ""}
+                        </option>
+                      ))}
+                    </select>
+
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        step="0.25"
+                        min="0"
+                        max="24"
+                        value={row?.heuresEffectives ?? heuresDefaut}
+                        onChange={(e) =>
+                          setRow(emp.id, {
+                            heuresEffectives: e.target.value,
+                            ...(separee ? {} : { heuresPayees: e.target.value }),
+                          })
+                        }
+                        className="w-20 px-2 py-1.5 rounded border text-sm"
+                        style={{ borderColor: PALETTE.line, background: "#fff" }}
+                      />
+                      <span className="text-xs" style={{ color: "#8A8271" }}>
+                        {separee ? "h effectives" : "heures"}
+                      </span>
+                    </div>
+
+                    {separee && (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          step="0.25"
+                          min="0"
+                          max="24"
+                          value={row?.heuresPayees ?? row?.heuresEffectives ?? heuresDefaut}
+                          onChange={(e) => setRow(emp.id, { heuresPayees: e.target.value })}
+                          className="w-20 px-2 py-1.5 rounded border text-sm"
+                          style={{ borderColor: PALETTE.rust, background: "#FBF0E9" }}
+                        />
+                        <span className="text-xs" style={{ color: PALETTE.rust }}>
+                          h payées
+                        </span>
+                      </div>
+                    )}
+
+                    <input
+                      type="text"
+                      placeholder="Parcelle (ex: P4)"
+                      value={row?.parcelle ?? ""}
+                      onChange={(e) => setRow(emp.id, { parcelle: e.target.value })}
+                      className="px-2 py-1.5 rounded border text-sm w-32"
+                      style={{ borderColor: PALETTE.line, background: "#fff" }}
+                    />
+                  </>
+                )}
+                {!present && (
+                  <span className="text-sm italic" style={{ color: "#B5AA88" }}>
+                    Absent ce jour
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Salariés (employee management) ----------
+function Salaries({ employees, updateEmployees }) {
+  const [nom, setNom] = useState("");
+  const [poste, setPoste] = useState("");
+  const [tauxHoraire, setTauxHoraire] = useState("");
+
+  const addEmployee = () => {
+    if (!nom.trim()) return;
+    updateEmployees([
+      ...employees,
+      { id: uid(), nom: nom.trim(), poste: poste.trim(), tauxHoraire: tauxHoraire || "" },
+    ]);
+    setNom("");
+    setPoste("");
+    setTauxHoraire("");
+  };
+
+  const removeEmployee = (id) => {
+    updateEmployees(employees.filter((e) => e.id !== id));
+  };
+
+  const updateRate = (id, value) => {
+    updateEmployees(employees.map((e) => (e.id === id ? { ...e, tauxHoraire: value } : e)));
+  };
+
+  return (
+    <div>
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4 mb-6">
+        <h2 className="font-semibold mb-3">Ajouter un salarié</h2>
+        <div className="flex flex-wrap gap-2">
+          <input
+            placeholder="Nom et prénom"
+            value={nom}
+            onChange={(e) => setNom(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addEmployee()}
+            className="px-3 py-2 rounded border text-sm flex-1 min-w-[180px]"
+            style={{ borderColor: PALETTE.line }}
+          />
+          <input
+            placeholder="Poste (ex: coupeur, tractoriste)"
+            value={poste}
+            onChange={(e) => setPoste(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addEmployee()}
+            className="px-3 py-2 rounded border text-sm flex-1 min-w-[180px]"
+            style={{ borderColor: PALETTE.line }}
+          />
+          <input
+            placeholder="Taux horaire (€, optionnel)"
+            type="number"
+            step="0.01"
+            value={tauxHoraire}
+            onChange={(e) => setTauxHoraire(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addEmployee()}
+            className="px-3 py-2 rounded border text-sm w-48"
+            style={{ borderColor: PALETTE.line }}
+          />
+          <button
+            onClick={addEmployee}
+            style={{ background: PALETTE.green }}
+            className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+          >
+            <Plus size={16} /> Ajouter
+          </button>
+        </div>
+      </div>
+
+      {employees.length === 0 ? (
+        <EmptyState text="Aucun salarié pour le moment. Ajoutez votre équipe ci-dessus." />
+      ) : (
+        <div className="space-y-2">
+          {employees.map((emp) => (
+            <div
+              key={emp.id}
+              style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }}
+              className="rounded-md p-3 flex items-center justify-between flex-wrap gap-2"
+            >
+              <div>
+                <div className="font-medium">{emp.nom}</div>
+                <div className="text-xs" style={{ color: "#8A8271" }}>
+                  {emp.poste || "Poste non renseigné"}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    placeholder="Taux"
+                    value={emp.tauxHoraire ?? ""}
+                    onChange={(e) => updateRate(emp.id, e.target.value)}
+                    className="w-24 px-2 py-1.5 rounded border text-sm"
+                    style={{ borderColor: PALETTE.line }}
+                  />
+                  <span className="text-xs" style={{ color: "#8A8271" }}>
+                    €/h
+                  </span>
+                </div>
+                <button onClick={() => removeEmployee(emp.id)} className="p-2 rounded hover:bg-black/5" style={{ color: PALETTE.rust }}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Équipes (groupes fixes réutilisables) ----------
+function Equipes({ employees, teams, updateTeams }) {
+  const [nom, setNom] = useState("");
+  const [membres, setMembres] = useState([]);
+  const [editingId, setEditingId] = useState(null);
+
+  const resetForm = () => {
+    setNom("");
+    setMembres([]);
+    setEditingId(null);
+  };
+
+  const toggleMembre = (empId) => {
+    setMembres((prev) => (prev.includes(empId) ? prev.filter((id) => id !== empId) : [...prev, empId]));
+  };
+
+  const saveTeam = () => {
+    if (!nom.trim() || membres.length === 0) return;
+    if (editingId) {
+      updateTeams(teams.map((t) => (t.id === editingId ? { ...t, nom: nom.trim(), employeeIds: membres } : t)));
+    } else {
+      updateTeams([...teams, { id: uid(), nom: nom.trim(), employeeIds: membres }]);
+    }
+    resetForm();
+  };
+
+  const editTeam = (team) => {
+    setEditingId(team.id);
+    setNom(team.nom);
+    setMembres(team.employeeIds);
+  };
+
+  const removeTeam = (id) => {
+    updateTeams(teams.filter((t) => t.id !== id));
+    if (editingId === id) resetForm();
+  };
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés » avant de créer des équipes." />;
+  }
+
+  return (
+    <div>
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4 mb-6">
+        <h2 className="font-semibold mb-3">{editingId ? "Modifier l'équipe" : "Créer une équipe"}</h2>
+        <input
+          placeholder="Nom de l'équipe (ex: Équipe coupe)"
+          value={nom}
+          onChange={(e) => setNom(e.target.value)}
+          className="px-3 py-2 rounded border text-sm w-full mb-3"
+          style={{ borderColor: PALETTE.line }}
+        />
+        <div className="flex flex-wrap gap-2 mb-3">
+          {employees.map((emp) => {
+            const checked = membres.includes(emp.id);
+            return (
+              <button
+                key={emp.id}
+                onClick={() => toggleMembre(emp.id)}
+                className="px-3 py-1.5 rounded-full text-sm border transition-colors"
+                style={{
+                  borderColor: checked ? PALETTE.green : PALETTE.line,
+                  background: checked ? PALETTE.green : "#fff",
+                  color: checked ? "#fff" : PALETTE.ink,
+                }}
+              >
+                {emp.nom}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={saveTeam}
+            style={{ background: PALETTE.green }}
+            className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+          >
+            <Plus size={16} /> {editingId ? "Enregistrer" : "Créer l'équipe"}
+          </button>
+          {editingId && (
+            <button onClick={resetForm} className="px-4 py-2 rounded text-sm font-medium" style={{ color: "#8A8271" }}>
+              Annuler
+            </button>
+          )}
+        </div>
+      </div>
+
+      {teams.length === 0 ? (
+        <EmptyState text="Aucune équipe pour le moment. Créez-en une ci-dessus pour pointer un groupe en un clic." />
+      ) : (
+        <div className="space-y-2">
+          {teams.map((team) => (
+            <div
+              key={team.id}
+              style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }}
+              className="rounded-md p-3 flex items-center justify-between"
+            >
+              <div>
+                <div className="font-medium">{team.nom}</div>
+                <div className="text-xs" style={{ color: "#8A8271" }}>
+                  {team.employeeIds
+                    .map((id) => employees.find((e) => e.id === id)?.nom)
+                    .filter(Boolean)
+                    .join(", ")}
+                </div>
+              </div>
+              <div className="flex gap-1">
+                <button onClick={() => editTeam(team)} className="px-2 py-1 rounded hover:bg-black/5 text-xs" style={{ color: PALETTE.green }}>
+                  Modifier
+                </button>
+                <button onClick={() => removeTeam(team.id)} className="p-2 rounded hover:bg-black/5" style={{ color: PALETTE.rust }}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ---------- Avances, acomptes et prêts ----------
+const TX_TYPES = [
+  { id: "avance", label: "Avance" },
+  { id: "acompte", label: "Acompte" },
+  { id: "pret", label: "Prêt" },
+  { id: "remboursement", label: "Remboursement" },
+];
+
+const fmtEuros = (n) => `${Number(n).toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+
+function Avances({ employees, transactions, updateTransactions }) {
+  const [employeeId, setEmployeeId] = useState(employees[0]?.id || "");
+  const [type, setType] = useState("avance");
+  const [montant, setMontant] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [note, setNote] = useState("");
+  const [filterEmp, setFilterEmp] = useState("all");
+
+  useEffect(() => {
+    if (!employeeId && employees.length > 0) setEmployeeId(employees[0].id);
+  }, [employees, employeeId]);
+
+  const addTx = () => {
+    if (!employeeId || !montant || Number(montant) <= 0) return;
+    updateTransactions([
+      ...transactions,
+      { id: uid(), employeeId, type, montant: Number(montant), date, note: note.trim() },
+    ]);
+    setMontant("");
+    setNote("");
+  };
+
+  const removeTx = (id) => {
+    updateTransactions(transactions.filter((t) => t.id !== id));
+  };
+
+  // Solde dû = avances + acomptes + prêts - remboursements, par salarié
+  const balances = useMemo(() => {
+    const map = {};
+    for (const t of transactions) {
+      if (!map[t.employeeId]) map[t.employeeId] = 0;
+      map[t.employeeId] += t.type === "remboursement" ? -t.montant : t.montant;
+    }
+    return map;
+  }, [transactions]);
+
+  const totalDu = Object.values(balances).reduce((s, v) => s + v, 0);
+
+  const filtered = transactions
+    .filter((t) => filterEmp === "all" || t.employeeId === filterEmp)
+    .slice()
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const exportCSV = () => {
+    const rows = [["Date", "Salarié", "Type", "Montant", "Note"]];
+    filtered.forEach((t) => {
+      const emp = employees.find((e) => e.id === t.employeeId);
+      rows.push([t.date, emp?.nom || "?", TX_TYPES.find((x) => x.id === t.type)?.label || t.type, t.montant, t.note || ""]);
+    });
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "avances_acomptes_prets.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  return (
+    <div>
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4 mb-6">
+        <h2 className="font-semibold mb-3">Nouvelle opération</h2>
+        <div className="flex flex-wrap gap-2">
+          <select
+            value={employeeId}
+            onChange={(e) => setEmployeeId(e.target.value)}
+            className="px-2 py-2 rounded border text-sm min-w-[160px]"
+            style={{ borderColor: PALETTE.line }}
+          >
+            {employees.map((emp) => (
+              <option key={emp.id} value={emp.id}>
+                {emp.nom}
+              </option>
+            ))}
+          </select>
+          <select
+            value={type}
+            onChange={(e) => setType(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          >
+            {TX_TYPES.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            placeholder="Montant (€)"
+            value={montant}
+            onChange={(e) => setMontant(e.target.value)}
+            className="px-3 py-2 rounded border text-sm w-32"
+            style={{ borderColor: PALETTE.line }}
+          />
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+          <input
+            type="text"
+            placeholder="Note (optionnel)"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            className="px-3 py-2 rounded border text-sm flex-1 min-w-[140px]"
+            style={{ borderColor: PALETTE.line }}
+          />
+          <button
+            onClick={addTx}
+            style={{ background: PALETTE.green }}
+            className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+          >
+            <Plus size={16} /> Ajouter
+          </button>
+        </div>
+        <p className="text-xs mt-2" style={{ color: "#8A8271" }}>
+          Astuce : utilisez « Remboursement » quand un prêt est remboursé (en espèces ou déduit de la paie) — ça
+          réduit le solde dû du salarié.
+        </p>
+      </div>
+
+      <h3 className="font-semibold mb-2">Soldes par salarié</h3>
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden mb-6">
+        {employees.map((emp, i) => {
+          const solde = balances[emp.id] || 0;
+          return (
+            <div
+              key={emp.id}
+              className="flex items-center justify-between px-4 py-2.5 text-sm"
+              style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+            >
+              <span>{emp.nom}</span>
+              <strong style={{ color: solde > 0 ? PALETTE.rust : "#8A8271" }}>{fmtEuros(solde)}</strong>
+            </div>
+          );
+        })}
+        <div
+          className="flex items-center justify-between px-4 py-2.5 text-sm font-semibold"
+          style={{ borderTop: `1px solid ${PALETTE.line}`, background: PALETTE.bg }}
+        >
+          <span>Total dû</span>
+          <span style={{ color: PALETTE.rust }}>{fmtEuros(totalDu)}</span>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h3 className="font-semibold">Historique</h3>
+        <div className="flex gap-2 items-center">
+          <select
+            value={filterEmp}
+            onChange={(e) => setFilterEmp(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          >
+            <option value="all">Tous les salariés</option>
+            {employees.map((emp) => (
+              <option key={emp.id} value={emp.id}>
+                {emp.nom}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={exportCSV}
+            style={{ background: PALETTE.rust }}
+            className="px-3 py-1.5 rounded text-white text-xs font-medium flex items-center gap-1.5"
+          >
+            <Download size={14} /> CSV
+          </button>
+        </div>
+      </div>
+
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+        {filtered.length === 0 && <div className="p-3 text-sm" style={{ color: "#8A8271" }}>Aucune opération.</div>}
+        {filtered.map((t, i) => {
+          const emp = employees.find((e) => e.id === t.employeeId);
+          const isNeg = t.type === "remboursement";
+          return (
+            <div
+              key={t.id}
+              className="flex items-center justify-between px-4 py-2.5 text-sm gap-2 flex-wrap"
+              style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+            >
+              <div>
+                <span className="font-medium">{emp?.nom || "?"}</span>{" "}
+                <span style={{ color: "#8A8271" }}>
+                  · {TX_TYPES.find((x) => x.id === t.type)?.label} · {t.date}
+                  {t.note ? ` · ${t.note}` : ""}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <strong style={{ color: isNeg ? PALETTE.green : PALETTE.rust }}>
+                  {isNeg ? "-" : "+"}
+                  {fmtEuros(t.montant)}
+                </strong>
+                <button onClick={() => removeTx(t.id)} className="p-1.5 rounded hover:bg-black/5" style={{ color: PALETTE.rust }}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Parametres({
+  tachesEcart,
+  updateTachesEcart,
+  heuresSup,
+  updateHeuresSup,
+  taches,
+  updateTaches,
+  heuresDefaut,
+  updateHeuresDefaut,
+}) {
+  const [nouvelleTache, setNouvelleTache] = useState("");
+  const [editingTache, setEditingTache] = useState(null); // ancien nom en cours d'édition
+  const [editValue, setEditValue] = useState("");
+
+  const toggle = (tache) => {
+    if (tachesEcart.includes(tache)) {
+      updateTachesEcart(tachesEcart.filter((t) => t !== tache));
+    } else {
+      updateTachesEcart([...tachesEcart, tache]);
+    }
+  };
+
+  const setHS = (patch) => updateHeuresSup({ ...heuresSup, ...patch });
+
+  const addTache = () => {
+    const val = nouvelleTache.trim();
+    if (!val || taches.includes(val)) return;
+    updateTaches([...taches, val]);
+    setNouvelleTache("");
+  };
+
+  const removeTache = (t) => {
+    updateTaches(taches.filter((x) => x !== t));
+    if (tachesEcart.includes(t)) {
+      updateTachesEcart(tachesEcart.filter((x) => x !== t));
+    }
+  };
+
+  const startEdit = (t) => {
+    setEditingTache(t);
+    setEditValue(t);
+  };
+
+  const saveEdit = () => {
+    const val = editValue.trim();
+    if (!val || !editingTache) {
+      setEditingTache(null);
+      return;
+    }
+    if (val !== editingTache) {
+      updateTaches(taches.map((t) => (t === editingTache ? val : t)));
+      if (tachesEcart.includes(editingTache)) {
+        updateTachesEcart(tachesEcart.map((t) => (t === editingTache ? val : t)));
+      }
+    }
+    setEditingTache(null);
+  };
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h2 className="font-semibold mb-1">Tâches</h2>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Ajoutez, renommez ou supprimez les tâches disponibles au pointage. Cochez celles pour lesquelles le temps
+          réellement travaillé et le temps payé au salarié peuvent différer (ex : temps de route, forfait tâche) —
+          deux champs d'heures apparaîtront alors dans le pointage pour ces tâches.
+        </p>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden mb-3">
+          {taches.map((t, i) => (
+            <div
+              key={t}
+              className="flex items-center justify-between gap-2 px-4 py-3 text-sm"
+              style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+            >
+              {editingTache === t ? (
+                <input
+                  autoFocus
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && saveEdit()}
+                  onBlur={saveEdit}
+                  className="px-2 py-1 rounded border text-sm flex-1"
+                  style={{ borderColor: PALETTE.green }}
+                />
+              ) : (
+                <button onClick={() => startEdit(t)} className="text-left flex-1" title="Appuyer pour renommer">
+                  {t}
+                </button>
+              )}
+              <label className="flex items-center gap-1.5 text-xs shrink-0" style={{ color: "#8A8271" }}>
+                <input
+                  type="checkbox"
+                  checked={tachesEcart.includes(t)}
+                  onChange={() => toggle(t)}
+                  className="w-4 h-4"
+                  style={{ accentColor: PALETTE.green }}
+                />
+                heures séparées
+              </label>
+              <button onClick={() => removeTache(t)} className="p-1.5 rounded hover:bg-black/5 shrink-0" style={{ color: PALETTE.rust }}>
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+          {taches.length === 0 && (
+            <div className="p-3 text-sm" style={{ color: "#8A8271" }}>
+              Aucune tâche. Ajoutez-en une ci-dessous.
+            </div>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <input
+            placeholder="Nouvelle tâche"
+            value={nouvelleTache}
+            onChange={(e) => setNouvelleTache(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addTache()}
+            className="px-3 py-2 rounded border text-sm flex-1"
+            style={{ borderColor: PALETTE.line }}
+          />
+          <button
+            onClick={addTache}
+            style={{ background: PALETTE.green }}
+            className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+          >
+            <Plus size={16} /> Ajouter
+          </button>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="font-semibold mb-1">Heures par défaut</h2>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Valeur pré-remplie (heures effectives et payées) quand vous marquez un salarié présent au pointage. Vous
+          pouvez toujours l'ajuster ligne par ligne.
+        </p>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm">Heures par défaut</label>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                step="0.25"
+                min="0"
+                value={heuresDefaut}
+                onChange={(e) => updateHeuresDefaut(e.target.value)}
+                className="w-24 px-2 py-1.5 rounded border text-sm"
+                style={{ borderColor: PALETTE.line }}
+              />
+              <span className="text-xs" style={{ color: "#8A8271" }}>
+                h
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="font-semibold mb-1">Heures supplémentaires</h2>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Valeurs par défaut = Code du travail (référence 35h/semaine). Ajustez-les si un avenant de la convention
+          IDCC 9971 prévoit des taux différents pour votre exploitation — à vérifier avec votre expert-comptable.
+        </p>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm">Seuil hebdomadaire normal (h)</label>
+            <input
+              type="number"
+              value={heuresSup.seuilNormal}
+              onChange={(e) => setHS({ seuilNormal: e.target.value })}
+              className="w-24 px-2 py-1.5 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm">Majoration 1 — de {heuresSup.seuilNormal + 1}h à ... (%)</label>
+            <input
+              type="number"
+              value={heuresSup.tauxMajo1}
+              onChange={(e) => setHS({ tauxMajo1: e.target.value })}
+              className="w-24 px-2 py-1.5 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm">Seuil majoration 2 (h/semaine)</label>
+            <input
+              type="number"
+              value={heuresSup.seuilMajo2}
+              onChange={(e) => setHS({ seuilMajo2: e.target.value })}
+              className="w-24 px-2 py-1.5 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm">Majoration 2 — au-delà (%)</label>
+            <input
+              type="number"
+              value={heuresSup.tauxMajo2}
+              onChange={(e) => setHS({ tauxMajo2: e.target.value })}
+              className="w-24 px-2 py-1.5 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Heures supplémentaires (weekly breakdown) ----------
+function HeuresSup({ employees, entries, heuresSup }) {
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(todayISO());
+
+  // Regroupe les heures payées par salarié puis par semaine (lundi)
+  const data = useMemo(() => {
+    const byEmp = {};
+    entries
+      .filter((e) => e.present && e.date >= start && e.date <= end)
+      .forEach((e) => {
+        const wk = weekStart(e.date);
+        if (!byEmp[e.employeeId]) byEmp[e.employeeId] = {};
+        byEmp[e.employeeId][wk] = (byEmp[e.employeeId][wk] || 0) + Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+      });
+    return byEmp;
+  }, [entries, start, end]);
+
+  const rate = (emp) => Number(emp.tauxHoraire) || 0;
+
+  return (
+    <div>
+      <div className="print-only mb-4">
+        <div className="font-bold text-lg">Heures supplémentaires — Habitation Ressource</div>
+        <div className="text-sm">
+          Du {start} au {end}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 mb-4 no-print">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <button
+          onClick={() => window.print()}
+          style={{ background: PALETTE.rust }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> Exporter PDF
+        </button>
+      </div>
+
+      <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
+        Seuils : normal jusqu'à {heuresSup.seuilNormal}h/semaine, majoration {heuresSup.tauxMajo1}% de{" "}
+        {heuresSup.seuilNormal + 1}h à {heuresSup.seuilMajo2}h, puis {heuresSup.tauxMajo2}% au-delà. Réglable dans
+        Paramètres.
+      </p>
+
+      {employees.length === 0 && <EmptyState text="Aucun salarié." />}
+
+      <div className="space-y-4">
+        {employees.map((emp) => {
+          const weeks = data[emp.id];
+          if (!weeks) return null;
+          const weekKeys = Object.keys(weeks).sort();
+          return (
+            <div key={emp.id} style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+              <div className="px-4 py-2.5 font-medium" style={{ background: PALETTE.bg, borderBottom: `1px solid ${PALETTE.line}` }}>
+                {emp.nom}
+              </div>
+              {weekKeys.map((wk, i) => {
+                const total = weeks[wk];
+                const { normales, majo1, majo2 } = splitOvertime(total, heuresSup);
+                const r = rate(emp);
+                const cost = r
+                  ? normales * r + majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
+                  : null;
+                return (
+                  <div
+                    key={wk}
+                    className="px-4 py-2.5 text-sm flex items-center justify-between flex-wrap gap-2"
+                    style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+                  >
+                    <span style={{ color: "#6B6552" }}>{weekLabel(wk)}</span>
+                    <span className="flex gap-3 flex-wrap">
+                      <span>Normales : <strong>{fmtHours(normales)}</strong></span>
+                      {majo1 > 0 && (
+                        <span style={{ color: PALETTE.rust }}>
+                          +{heuresSup.tauxMajo1}% : <strong>{fmtHours(majo1)}</strong>
+                        </span>
+                      )}
+                      {majo2 > 0 && (
+                        <span style={{ color: PALETTE.rust }}>
+                          +{heuresSup.tauxMajo2}% : <strong>{fmtHours(majo2)}</strong>
+                        </span>
+                      )}
+                      {cost !== null && (
+                        <span style={{ color: PALETTE.green }}>≈ {cost.toFixed(2)} €</span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Récapitulatif (summary + export) ----------
+// ---------- Simulation de paie (brut estimé + avances/acomptes/prêts) ----------
+function SimulationPaie({ employees, entries, transactions, heuresSup }) {
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(todayISO());
+
+  // Brut estimé par salarié : regroupement par semaine ISO, avec majorations
+  const bruts = useMemo(() => {
+    const byEmp = {};
+    entries
+      .filter((e) => e.present && e.date >= start && e.date <= end)
+      .forEach((e) => {
+        const wk = weekStart(e.date);
+        if (!byEmp[e.employeeId]) byEmp[e.employeeId] = {};
+        byEmp[e.employeeId][wk] = (byEmp[e.employeeId][wk] || 0) + Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+      });
+    const result = {};
+    for (const [empId, weeks] of Object.entries(byEmp)) {
+      let normales = 0,
+        majo1 = 0,
+        majo2 = 0;
+      Object.values(weeks).forEach((total) => {
+        const s = splitOvertime(total, heuresSup);
+        normales += s.normales;
+        majo1 += s.majo1;
+        majo2 += s.majo2;
+      });
+      result[empId] = { normales, majo1, majo2 };
+    }
+    return result;
+  }, [entries, start, end, heuresSup]);
+
+  // Avances/acomptes/prêts/remboursements de la période, par salarié
+  const mouvements = useMemo(() => {
+    const byEmp = {};
+    transactions
+      .filter((t) => t.date >= start && t.date <= end)
+      .forEach((t) => {
+        if (!byEmp[t.employeeId]) byEmp[t.employeeId] = { avance: 0, acompte: 0, pret: 0, remboursement: 0 };
+        byEmp[t.employeeId][t.type] += t.montant;
+      });
+    return byEmp;
+  }, [transactions, start, end]);
+
+  const rate = (emp) => Number(emp.tauxHoraire) || 0;
+
+  const lignes = employees.map((emp) => {
+    const b = bruts[emp.id] || { normales: 0, majo1: 0, majo2: 0 };
+    const r = rate(emp);
+    const brut = r
+      ? b.normales * r + b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
+      : 0;
+    const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0 };
+    const deductions = m.avance + m.acompte;
+    const net = brut - deductions;
+    return { emp, b, brut, m, deductions, net };
+  });
+
+  const totalBrut = lignes.reduce((s, l) => s + l.brut, 0);
+  const totalDeductions = lignes.reduce((s, l) => s + l.deductions, 0);
+  const totalNet = lignes.reduce((s, l) => s + l.net, 0);
+
+  const exportCSV = () => {
+    const rows = [
+      [
+        "Salarié",
+        "Heures normales",
+        "Heures majo 1",
+        "Heures majo 2",
+        "Brut estimé (€)",
+        "Avances/acomptes période (€)",
+        "Net estimé (€)",
+      ],
+    ];
+    lignes.forEach((l) => {
+      rows.push([
+        l.emp.nom,
+        l.b.normales.toFixed(2),
+        l.b.majo1.toFixed(2),
+        l.b.majo2.toFixed(2),
+        l.brut.toFixed(2),
+        l.deductions.toFixed(2),
+        l.net.toFixed(2),
+      ]);
+    });
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `simulation_paie_${start}_${end}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  return (
+    <div>
+      <div className="print-only mb-4">
+        <div className="font-bold text-lg">Simulation de paie — Habitation Ressource</div>
+        <div className="text-sm">
+          Du {start} au {end}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 mb-4 no-print">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <button
+          onClick={exportCSV}
+          style={{ background: PALETTE.green }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> CSV
+        </button>
+        <button
+          onClick={() => window.print()}
+          style={{ background: PALETTE.rust }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> PDF
+        </button>
+      </div>
+
+      <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
+        Estimation indicative à partir des heures pointées, du taux horaire de chaque salarié et des seuils
+        d'heures sup réglés dans Paramètres. Les avances et acomptes de la période sont déduits du brut. Les
+        cotisations sociales et charges ne sont pas incluses — ceci n'est pas une fiche de paie officielle.
+      </p>
+
+      <div className="space-y-2">
+        {lignes.map(({ emp, b, brut, m, deductions, net }) => {
+          const hasRate = Number(emp.tauxHoraire) > 0;
+          return (
+            <div
+              key={emp.id}
+              style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }}
+              className="rounded-md p-3"
+            >
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-1.5">
+                <span className="font-medium">{emp.nom}</span>
+                <span className="font-semibold" style={{ color: PALETTE.green }}>
+                  Net estimé : {fmtEuros(net)}
+                </span>
+              </div>
+              {!hasRate ? (
+                <div className="text-xs" style={{ color: PALETTE.rust }}>
+                  Aucun taux horaire renseigné (onglet Salariés) — impossible d'estimer le brut.
+                </div>
+              ) : (
+                <div className="text-xs flex flex-wrap gap-x-4 gap-y-1" style={{ color: "#8A8271" }}>
+                  <span>
+                    Heures : {fmtHours(b.normales)} normales
+                    {b.majo1 > 0 ? ` · +${heuresSup.tauxMajo1}% ${fmtHours(b.majo1)}` : ""}
+                    {b.majo2 > 0 ? ` · +${heuresSup.tauxMajo2}% ${fmtHours(b.majo2)}` : ""}
+                  </span>
+                  <span>Brut estimé : {fmtEuros(brut)}</span>
+                  {deductions > 0 && <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(deductions)}</span>}
+                  {m.pret > 0 && <span>Prêt(s) versé(s) : {fmtEuros(m.pret)} (non déduit du net, voir Avances)</span>}
+                  {m.remboursement > 0 && <span>Remboursement reçu : {fmtEuros(m.remboursement)}</span>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div
+        style={{ background: PALETTE.bg, border: `1px solid ${PALETTE.line}` }}
+        className="rounded-md p-3 mt-4 flex flex-wrap justify-between gap-2 text-sm font-semibold"
+      >
+        <span>Total brut estimé : {fmtEuros(totalBrut)}</span>
+        <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(totalDeductions)}</span>
+        <span style={{ color: PALETTE.green }}>= Net estimé : {fmtEuros(totalNet)}</span>
+      </div>
+    </div>
+  );
+}
+
+
+function Recap({ employees, entries }) {
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(todayISO());
+
+  const filtered = useMemo(
+    () => entries.filter((e) => e.present && e.date >= start && e.date <= end),
+    [entries, start, end]
+  );
+
+  const byEmployee = useMemo(() => {
+    const map = {};
+    for (const e of filtered) {
+      if (!map[e.employeeId]) map[e.employeeId] = { eff: 0, paye: 0, jours: 0 };
+      map[e.employeeId].eff += Number(e.heuresEffectives || 0);
+      map[e.employeeId].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+      map[e.employeeId].jours += 1;
+    }
+    return map;
+  }, [filtered]);
+
+  const byTache = useMemo(() => {
+    const map = {};
+    for (const e of filtered) {
+      if (!map[e.tache]) map[e.tache] = { eff: 0, paye: 0 };
+      map[e.tache].eff += Number(e.heuresEffectives || 0);
+      map[e.tache].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+    }
+    return Object.entries(map).sort((a, b) => b[1].paye - a[1].paye);
+  }, [filtered]);
+
+  const totalEff = filtered.reduce((s, e) => s + Number(e.heuresEffectives || 0), 0);
+  const totalPaye = filtered.reduce((s, e) => s + Number(e.heuresPayees ?? e.heuresEffectives ?? 0), 0);
+
+  const exportCSV = () => {
+    const rows = [["Date", "Salarié", "Heures effectives", "Heures payées", "Tâche", "Parcelle", "Note"]];
+    filtered
+      .slice()
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .forEach((e) => {
+        const emp = employees.find((x) => x.id === e.employeeId);
+        rows.push([
+          e.date,
+          emp?.nom || "?",
+          e.heuresEffectives,
+          e.heuresPayees ?? e.heuresEffectives,
+          e.tache,
+          e.parcelle,
+          e.note || "",
+        ]);
+      });
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pointage_${start}_${end}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div>
+      <div className="print-only mb-4">
+        <div className="font-bold text-lg">Récapitulatif de pointage — Habitation Ressource</div>
+        <div className="text-sm">
+          Du {start} au {end}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-end gap-3 mb-6 no-print">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <button
+          onClick={exportCSV}
+          style={{ background: PALETTE.green }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> Exporter CSV
+        </button>
+        <button
+          onClick={() => window.print()}
+          style={{ background: PALETTE.rust }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> Exporter PDF
+        </button>
+      </div>
+
+      <div className="mb-6 text-sm flex gap-4 flex-wrap" style={{ color: "#6B6552" }}>
+        <span>
+          Effectives : <strong style={{ color: PALETTE.green }}>{fmtHours(totalEff)}</strong>
+        </span>
+        <span>
+          Payées : <strong style={{ color: PALETTE.rust }}>{fmtHours(totalPaye)}</strong>
+        </span>
+        <span>{new Set(filtered.map((e) => e.date)).size} jour(s) pointé(s)</span>
+      </div>
+
+      <h3 className="font-semibold mb-2">Par salarié</h3>
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden mb-6">
+        {employees.length === 0 && <div className="p-3 text-sm" style={{ color: "#8A8271" }}>Aucun salarié.</div>}
+        {employees.map((emp, i) => {
+          const stats = byEmployee[emp.id];
+          if (!stats) return null;
+          const ecart = stats.eff !== stats.paye;
+          return (
+            <div
+              key={emp.id}
+              className="flex items-center justify-between px-4 py-2.5 text-sm"
+              style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+            >
+              <span>
+                {emp.nom} <span style={{ color: "#8A8271" }}>({stats.jours} j)</span>
+              </span>
+              <span>
+                {ecart && (
+                  <span style={{ color: "#8A8271" }} className="mr-2">
+                    eff. {fmtHours(stats.eff)} ·
+                  </span>
+                )}
+                <strong style={{ color: ecart ? PALETTE.rust : PALETTE.ink }}>{fmtHours(stats.paye)}</strong>
+                {ecart && (
+                  <span style={{ color: "#8A8271" }} className="text-xs">
+                    {" "}
+                    payées
+                  </span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <h3 className="font-semibold mb-2">Par tâche</h3>
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+        {byTache.length === 0 && <div className="p-3 text-sm" style={{ color: "#8A8271" }}>Aucune donnée sur cette période.</div>}
+        {byTache.map(([tache, stats], i) => {
+          const ecart = stats.eff !== stats.paye;
+          return (
+            <div
+              key={tache}
+              className="flex items-center justify-between px-4 py-2.5 text-sm"
+              style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+            >
+              <span>{tache}</span>
+              <span>
+                {ecart && (
+                  <span style={{ color: "#8A8271" }} className="mr-2">
+                    eff. {fmtHours(stats.eff)} ·
+                  </span>
+                )}
+                <strong style={{ color: ecart ? PALETTE.rust : PALETTE.ink }}>{fmtHours(stats.paye)}</strong>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Empty state ----------
+function EmptyState({ text }) {
+  return (
+    <div
+      style={{ border: `1px dashed ${PALETTE.line}`, color: "#8A8271" }}
+      className="rounded-md p-8 text-center text-sm"
+    >
+      {text}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<PointageApp />);
+</script>
+</body>
+</html>
