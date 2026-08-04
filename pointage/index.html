@@ -314,6 +314,14 @@ function PointageApp() {
             updateTaches={updateTaches}
             heuresDefaut={heuresDefaut}
             updateHeuresDefaut={updateHeuresDefaut}
+            employees={employees}
+            updateEmployees={updateEmployees}
+            teams={teams}
+            updateTeams={updateTeams}
+            entries={entries}
+            updateEntries={updateEntries}
+            transactions={transactions}
+            updateTransactions={updateTransactions}
           />
         )}
       </main>
@@ -1196,10 +1204,62 @@ function Parametres({
   updateTaches,
   heuresDefaut,
   updateHeuresDefaut,
+  employees,
+  updateEmployees,
+  teams,
+  updateTeams,
+  entries,
+  updateEntries,
+  transactions,
+  updateTransactions,
 }) {
   const [nouvelleTache, setNouvelleTache] = useState("");
   const [editingTache, setEditingTache] = useState(null); // ancien nom en cours d'édition
   const [editValue, setEditValue] = useState("");
+  const [restoreMsg, setRestoreMsg] = useState("");
+
+  const exportBackup = () => {
+    const backup = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      employees,
+      teams,
+      entries,
+      transactions,
+      config: { tachesEcart, heuresSup, taches, heuresDefaut },
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pointage-sauvegarde-${todayISO()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importBackup = (file) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (!data || typeof data !== "object") throw new Error("format invalide");
+        if (Array.isArray(data.employees)) updateEmployees(data.employees);
+        if (Array.isArray(data.teams)) updateTeams(data.teams);
+        if (Array.isArray(data.entries)) updateEntries(data.entries);
+        if (Array.isArray(data.transactions)) updateTransactions(data.transactions);
+        if (data.config) {
+          if (Array.isArray(data.config.tachesEcart)) updateTachesEcart(data.config.tachesEcart);
+          if (data.config.heuresSup) updateHeuresSup(data.config.heuresSup);
+          if (Array.isArray(data.config.taches) && data.config.taches.length > 0) updateTaches(data.config.taches);
+          if (data.config.heuresDefaut !== undefined) updateHeuresDefaut(data.config.heuresDefaut);
+        }
+        setRestoreMsg("Sauvegarde restaurée avec succès.");
+      } catch (err) {
+        setRestoreMsg("Fichier invalide — impossible de restaurer cette sauvegarde.");
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const toggle = (tache) => {
     if (tachesEcart.includes(tache)) {
@@ -1389,6 +1449,47 @@ function Parametres({
               className="w-24 px-2 py-1.5 rounded border text-sm"
               style={{ borderColor: PALETTE.line }}
             />
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="font-semibold mb-1">Sauvegarde et restauration</h2>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Toutes vos données (salariés, pointages, avances, réglages) sont stockées uniquement dans ce navigateur.
+          Téléchargez une sauvegarde régulièrement — c'est le seul moyen de tout récupérer si vous videz le cache
+          Safari ou changez d'appareil.
+        </p>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4 space-y-4">
+          <div>
+            <button
+              onClick={exportBackup}
+              style={{ background: PALETTE.green }}
+              className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+            >
+              <Download size={16} /> Télécharger une sauvegarde complète
+            </button>
+          </div>
+          <div style={{ borderTop: `1px solid ${PALETTE.line}` }} className="pt-4">
+            <label className="text-sm font-medium block mb-2">Restaurer une sauvegarde</label>
+            <input
+              type="file"
+              accept="application/json"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) importBackup(file);
+                e.target.value = "";
+              }}
+              className="text-sm"
+            />
+            <p className="text-xs mt-2" style={{ color: PALETTE.rust }}>
+              ⚠️ Ceci remplace toutes les données actuellement affichées par celles du fichier.
+            </p>
+            {restoreMsg && (
+              <p className="text-xs mt-2" style={{ color: PALETTE.green }}>
+                {restoreMsg}
+              </p>
+            )}
           </div>
         </div>
       </div>
