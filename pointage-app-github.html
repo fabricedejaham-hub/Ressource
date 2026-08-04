@@ -1385,7 +1385,7 @@ function HeuresSup({ employees, entries, heuresSup }) {
   });
   const [end, setEnd] = useState(todayISO());
 
-  // Regroupe les heures payées par salarié puis par semaine (lundi)
+  // Regroupe les heures par salarié puis par semaine (lundi) — effectives ET payées séparément
   const data = useMemo(() => {
     const byEmp = {};
     entries
@@ -1393,7 +1393,9 @@ function HeuresSup({ employees, entries, heuresSup }) {
       .forEach((e) => {
         const wk = weekStart(e.date);
         if (!byEmp[e.employeeId]) byEmp[e.employeeId] = {};
-        byEmp[e.employeeId][wk] = (byEmp[e.employeeId][wk] || 0) + Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+        if (!byEmp[e.employeeId][wk]) byEmp[e.employeeId][wk] = { eff: 0, paye: 0 };
+        byEmp[e.employeeId][wk].eff += Number(e.heuresEffectives || 0);
+        byEmp[e.employeeId][wk].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
       });
     return byEmp;
   }, [entries, start, end]);
@@ -1444,9 +1446,10 @@ function HeuresSup({ employees, entries, heuresSup }) {
       </div>
 
       <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
-        Seuils : normal jusqu'à {heuresSup.seuilNormal}h/semaine, majoration {heuresSup.tauxMajo1}% de{" "}
-        {heuresSup.seuilNormal + 1}h à {heuresSup.seuilMajo2}h, puis {heuresSup.tauxMajo2}% au-delà. Réglable dans
-        Paramètres.
+        Seuils calculés sur les <strong>heures effectivement travaillées</strong> (pas les heures payées) : normal
+        jusqu'à {heuresSup.seuilNormal}h/semaine, majoration {heuresSup.tauxMajo1}% de{" "}
+        {heuresSup.seuilNormal + 1}h à {heuresSup.seuilMajo2}h effectuées, puis {heuresSup.tauxMajo2}% au-delà.
+        Réglable dans Paramètres.
       </p>
 
       {employees.length === 0 && <EmptyState text="Aucun salarié." />}
@@ -1462,11 +1465,15 @@ function HeuresSup({ employees, entries, heuresSup }) {
                 {emp.nom}
               </div>
               {weekKeys.map((wk, i) => {
-                const total = weeks[wk];
-                const { normales, majo1, majo2 } = splitOvertime(total, heuresSup);
+                const { eff, paye } = weeks[wk];
+                const { normales, majo1, majo2 } = splitOvertime(eff, heuresSup);
+                const extraPaye = Math.max(0, paye - eff);
                 const r = rate(emp);
                 const cost = r
-                  ? normales * r + majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
+                  ? normales * r +
+                    majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
+                    majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
+                    extraPaye * r
                   : null;
                 return (
                   <div
@@ -1485,6 +1492,11 @@ function HeuresSup({ employees, entries, heuresSup }) {
                       {majo2 > 0 && (
                         <span style={{ color: PALETTE.rust }}>
                           +{heuresSup.tauxMajo2}% : <strong>{fmtHours(majo2)}</strong>
+                        </span>
+                      )}
+                      {extraPaye > 0 && (
+                        <span style={{ color: "#8A8271" }}>
+                          + payé hors travail effectif : <strong>{fmtHours(extraPaye)}</strong>
                         </span>
                       )}
                       {cost !== null && (
@@ -1520,20 +1532,24 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
       .forEach((e) => {
         const wk = weekStart(e.date);
         if (!byEmp[e.employeeId]) byEmp[e.employeeId] = {};
-        byEmp[e.employeeId][wk] = (byEmp[e.employeeId][wk] || 0) + Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+        if (!byEmp[e.employeeId][wk]) byEmp[e.employeeId][wk] = { eff: 0, paye: 0 };
+        byEmp[e.employeeId][wk].eff += Number(e.heuresEffectives || 0);
+        byEmp[e.employeeId][wk].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
       });
     const result = {};
     for (const [empId, weeks] of Object.entries(byEmp)) {
       let normales = 0,
         majo1 = 0,
-        majo2 = 0;
-      Object.values(weeks).forEach((total) => {
-        const s = splitOvertime(total, heuresSup);
+        majo2 = 0,
+        extraPaye = 0;
+      Object.values(weeks).forEach(({ eff, paye }) => {
+        const s = splitOvertime(eff, heuresSup);
         normales += s.normales;
         majo1 += s.majo1;
         majo2 += s.majo2;
+        extraPaye += Math.max(0, paye - eff);
       });
-      result[empId] = { normales, majo1, majo2 };
+      result[empId] = { normales, majo1, majo2, extraPaye };
     }
     return result;
   }, [entries, start, end, heuresSup]);
@@ -1553,10 +1569,13 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
   const rate = (emp) => Number(emp.tauxHoraire) || 0;
 
   const lignes = employees.map((emp) => {
-    const b = bruts[emp.id] || { normales: 0, majo1: 0, majo2: 0 };
+    const b = bruts[emp.id] || { normales: 0, majo1: 0, majo2: 0, extraPaye: 0 };
     const r = rate(emp);
     const brut = r
-      ? b.normales * r + b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
+      ? b.normales * r +
+        b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
+        b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
+        b.extraPaye * r
       : 0;
     const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0 };
     const deductions = m.avance + m.acompte;
@@ -1686,6 +1705,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
                     Heures : {fmtHours(b.normales)} normales
                     {b.majo1 > 0 ? ` · +${heuresSup.tauxMajo1}% ${fmtHours(b.majo1)}` : ""}
                     {b.majo2 > 0 ? ` · +${heuresSup.tauxMajo2}% ${fmtHours(b.majo2)}` : ""}
+                    {b.extraPaye > 0 ? ` · +${fmtHours(b.extraPaye)} payées hors travail effectif` : ""}
                   </span>
                   <span>Brut estimé : {fmtEuros(brut)}</span>
                   {deductions > 0 && <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(deductions)}</span>}
