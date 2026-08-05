@@ -127,6 +127,9 @@ const DEFAULT_HS = {
   tauxMajo2: 50, // % au-delà
 };
 
+// Taux moyen indicatif de cotisations sociales salariales (non-cadre) — à ajuster avec votre bulletin de paie réel
+const DEFAULT_TAUX_COTISATIONS = 22;
+
 // Lundi de la semaine ISO contenant la date donnée
 const weekStart = (iso) => {
   const d = new Date(iso + "T00:00:00");
@@ -170,6 +173,7 @@ function PointageApp() {
   const [taches, setTaches] = useState(DEFAULT_TACHES);
   const [heuresDefaut, setHeuresDefaut] = useState(7);
   const [heuresSup, setHeuresSup] = useState(DEFAULT_HS);
+  const [tauxCotisations, setTauxCotisations] = useState(DEFAULT_TAUX_COTISATIONS);
   const [tab, setTab] = useState("pointage");
   const [selectedDate, setSelectedDate] = useState(todayISO());
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
@@ -203,6 +207,7 @@ function PointageApp() {
           setHeuresSup({ ...DEFAULT_HS, ...(cfg.heuresSup || {}) });
           setTaches(cfg.taches && cfg.taches.length > 0 ? cfg.taches : DEFAULT_TACHES);
           setHeuresDefaut(cfg.heuresDefaut ?? 7);
+          setTauxCotisations(cfg.tauxCotisations ?? DEFAULT_TAUX_COTISATIONS);
         }
       } catch (e) {
         console.error("Erreur de chargement", e);
@@ -247,22 +252,27 @@ function PointageApp() {
 
   const updateTachesEcart = (next) => {
     setTachesEcart(next);
-    persist("config", { tachesEcart: next, heuresSup, taches, heuresDefaut });
+    persist("config", { tachesEcart: next, heuresSup, taches, heuresDefaut, tauxCotisations });
   };
 
   const updateHeuresSup = (next) => {
     setHeuresSup(next);
-    persist("config", { tachesEcart, heuresSup: next, taches, heuresDefaut });
+    persist("config", { tachesEcart, heuresSup: next, taches, heuresDefaut, tauxCotisations });
   };
 
   const updateTaches = (next) => {
     setTaches(next);
-    persist("config", { tachesEcart, heuresSup, taches: next, heuresDefaut });
+    persist("config", { tachesEcart, heuresSup, taches: next, heuresDefaut, tauxCotisations });
   };
 
   const updateHeuresDefaut = (next) => {
     setHeuresDefaut(next);
-    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut: next });
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut: next, tauxCotisations });
+  };
+
+  const updateTauxCotisations = (next) => {
+    setTauxCotisations(next);
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut, tauxCotisations: next });
   };
 
   if (loading) {
@@ -308,7 +318,7 @@ function PointageApp() {
         )}
         {tab === "recap" && <Recap employees={employees} entries={entries} />}
         {tab === "synthese" && (
-          <SyntheseSalarie employees={employees} entries={entries} transactions={transactions} heuresSup={heuresSup} />
+          <SyntheseSalarie employees={employees} entries={entries} transactions={transactions} heuresSup={heuresSup} tauxCotisations={tauxCotisations} />
         )}
         {tab === "absences" && <Absences employees={employees} entries={entries} />}
         {tab === "conges" && (
@@ -316,7 +326,7 @@ function PointageApp() {
         )}
         {tab === "heuresSup" && <HeuresSup employees={employees} entries={entries} heuresSup={heuresSup} />}
         {tab === "simulation" && (
-          <SimulationPaie employees={employees} entries={entries} transactions={transactions} heuresSup={heuresSup} />
+          <SimulationPaie employees={employees} entries={entries} transactions={transactions} heuresSup={heuresSup} tauxCotisations={tauxCotisations} />
         )}
         {tab === "parametres" && (
           <Parametres
@@ -328,6 +338,8 @@ function PointageApp() {
             updateTaches={updateTaches}
             heuresDefaut={heuresDefaut}
             updateHeuresDefaut={updateHeuresDefaut}
+            tauxCotisations={tauxCotisations}
+            updateTauxCotisations={updateTauxCotisations}
             employees={employees}
             updateEmployees={updateEmployees}
             teams={teams}
@@ -1248,6 +1260,8 @@ function Parametres({
   updateTaches,
   heuresDefaut,
   updateHeuresDefaut,
+  tauxCotisations,
+  updateTauxCotisations,
   employees,
   updateEmployees,
   teams,
@@ -1443,6 +1457,30 @@ function Parametres({
                 h
               </span>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="font-semibold mb-1">Cotisations sociales salariales</h2>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Taux moyen déduit du brut pour estimer le net à payer dans Simulation paie et Synthèse salarié. La valeur
+          par défaut (22%) est indicative — vérifiez le taux réel sur un bulletin de paie de votre exploitation,
+          il varie selon le statut et les caisses agricoles (MSA).
+        </p>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm">Taux de cotisations salariales (%)</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              max="100"
+              value={tauxCotisations}
+              onChange={(e) => updateTauxCotisations(e.target.value)}
+              className="w-24 px-2 py-1.5 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
           </div>
         </div>
       </div>
@@ -1681,7 +1719,7 @@ function HeuresSup({ employees, entries, heuresSup }) {
 
 // ---------- Récapitulatif (summary + export) ----------
 // ---------- Simulation de paie (brut estimé + avances/acomptes/prêts) ----------
-function SimulationPaie({ employees, entries, transactions, heuresSup }) {
+function SimulationPaie({ employees, entries, transactions, heuresSup, tauxCotisations }) {
   const [start, setStart] = useState(() => {
     const d = new Date();
     d.setDate(1);
@@ -1742,13 +1780,15 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
         b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
         b.extraPaye * r
       : 0;
+    const cotisations = brut * (Number(tauxCotisations) / 100);
     const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0 };
     const deductions = m.avance + m.acompte;
-    const net = brut - deductions;
-    return { emp, b, brut, m, deductions, net };
+    const net = brut - cotisations - deductions;
+    return { emp, b, brut, cotisations, m, deductions, net };
   });
 
   const totalBrut = lignes.reduce((s, l) => s + l.brut, 0);
+  const totalCotisations = lignes.reduce((s, l) => s + l.cotisations, 0);
   const totalDeductions = lignes.reduce((s, l) => s + l.deductions, 0);
   const totalNet = lignes.reduce((s, l) => s + l.net, 0);
 
@@ -1760,6 +1800,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
         "Heures majo 1",
         "Heures majo 2",
         "Brut estimé (€)",
+        "Cotisations salariales (€)",
         "Avances/acomptes période (€)",
         "Net estimé (€)",
       ],
@@ -1771,6 +1812,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
         l.b.majo1.toFixed(2),
         l.b.majo2.toFixed(2),
         l.brut.toFixed(2),
+        l.cotisations.toFixed(2),
         l.deductions.toFixed(2),
         l.net.toFixed(2),
       ]);
@@ -1841,12 +1883,13 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
 
       <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
         Estimation indicative à partir des heures pointées, du taux horaire de chaque salarié et des seuils
-        d'heures sup réglés dans Paramètres. Les avances et acomptes de la période sont déduits du brut. Les
-        cotisations sociales et charges ne sont pas incluses — ceci n'est pas une fiche de paie officielle.
+        d'heures sup réglés dans Paramètres. Le net déduit un taux de cotisations sociales estimé ({tauxCotisations}%,
+        réglable dans Paramètres) ainsi que les avances/acomptes de la période — ceci reste indicatif, pas une
+        fiche de paie officielle.
       </p>
 
       <div className="space-y-2">
-        {lignes.map(({ emp, b, brut, m, deductions, net }) => {
+        {lignes.map(({ emp, b, brut, cotisations, m, deductions, net }) => {
           const hasRate = Number(emp.tauxHoraire) > 0;
           return (
             <div
@@ -1873,6 +1916,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
                     {b.extraPaye > 0 ? ` · +${fmtHours(b.extraPaye)} payées hors travail effectif` : ""}
                   </span>
                   <span>Brut estimé : {fmtEuros(brut)}</span>
+                  <span style={{ color: PALETTE.rust }}>− Cotisations ({tauxCotisations}%) : {fmtEuros(cotisations)}</span>
                   {deductions > 0 && <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(deductions)}</span>}
                   {m.pret > 0 && <span>Prêt(s) versé(s) : {fmtEuros(m.pret)} (non déduit du net, voir Avances)</span>}
                   {m.remboursement > 0 && <span>Remboursement reçu : {fmtEuros(m.remboursement)}</span>}
@@ -1888,6 +1932,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
         className="rounded-md p-3 mt-4 flex flex-wrap justify-between gap-2 text-sm font-semibold"
       >
         <span>Total brut estimé : {fmtEuros(totalBrut)}</span>
+        <span style={{ color: PALETTE.rust }}>− Cotisations : {fmtEuros(totalCotisations)}</span>
         <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(totalDeductions)}</span>
         <span style={{ color: PALETTE.green }}>= Net estimé : {fmtEuros(totalNet)}</span>
       </div>
@@ -2293,7 +2338,7 @@ function CongesAbsences({ employees, updateEmployees, entries, updateEntries, ta
 
 
 // ---------- Synthèse par salarié (tout regroupé pour une période) ----------
-function SyntheseSalarie({ employees, entries, transactions, heuresSup }) {
+function SyntheseSalarie({ employees, entries, transactions, heuresSup, tauxCotisations }) {
   const [employeeId, setEmployeeId] = useState(employees[0]?.id || "");
   const [start, setStart] = useState(() => {
     const d = new Date();
@@ -2389,10 +2434,11 @@ function SyntheseSalarie({ employees, entries, transactions, heuresSup }) {
       heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
       heuresSupCalc.extraPaye * r
     : 0;
+  const cotisations = brut * (Number(tauxCotisations) / 100);
   const deductionsPeriode = mouvementsPeriode
     .filter((t) => t.type === "avance" || t.type === "acompte")
     .reduce((s, t) => s + t.montant, 0);
-  const net = brut - deductionsPeriode;
+  const net = brut - cotisations - deductionsPeriode;
 
   const exportPDF = () => window.print();
 
@@ -2610,6 +2656,10 @@ function SyntheseSalarie({ employees, entries, transactions, heuresSup }) {
                   <strong>{fmtEuros(brut)}</strong>
                 </div>
                 <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                  <span>− Cotisations ({tauxCotisations}%)</span>
+                  <strong>{fmtEuros(cotisations)}</strong>
+                </div>
+                <div className="flex justify-between" style={{ color: PALETTE.rust }}>
                   <span>− Avances/acomptes (période)</span>
                   <strong>{fmtEuros(deductionsPeriode)}</strong>
                 </div>
@@ -2620,7 +2670,7 @@ function SyntheseSalarie({ employees, entries, transactions, heuresSup }) {
               </div>
             )}
             <p className="text-xs mt-3" style={{ color: "#8A8271" }}>
-              Estimation indicative — cotisations sociales et charges non incluses, pas un bulletin de paie officiel.
+              Estimation indicative — taux de cotisations réglable dans Paramètres, pas un bulletin de paie officiel.
             </p>
           </div>
         </div>
