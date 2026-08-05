@@ -423,43 +423,53 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
     setSelectedDate(d.toISOString().slice(0, 10));
   };
 
-  const rowFor = (empId) => dayEntries.find((e) => e.employeeId === empId);
+  // Tous les postes (segments) du jour pour un salarié
+  const segmentsFor = (empId) => dayEntries.filter((e) => e.employeeId === empId && e.present);
+  // Entrée d'absence éventuelle (pas de segment présent, mais un motif a pu être saisi)
+  const absenceFor = (empId) => dayEntries.find((e) => e.employeeId === empId && !e.present);
 
-  const setRow = (empId, patch) => {
-    const existing = rowFor(empId);
-    let next;
-    if (existing) {
-      const merged = { ...existing, ...patch };
-      // si la tâche change et n'est plus une tâche à écart, aligner heures payées sur heures effectives
-      if (!tachesEcart.includes(merged.tache)) {
-        merged.heuresPayees = merged.heuresEffectives;
-      }
-      next = entries.map((e) => (e.id === existing.id ? merged : e));
-    } else {
-      const base = {
-        id: uid(),
-        date: selectedDate,
-        employeeId: empId,
-        present: true,
-        heuresEffectives: heuresDefaut,
-        heuresPayees: heuresDefaut,
-        tache: taches[0],
-        parcelle: "",
-        note: "",
-        ...patch,
-      };
-      if (!tachesEcart.includes(base.tache)) base.heuresPayees = base.heuresEffectives;
-      next = [...entries, base];
+  const updateSegment = (entryId, patch) => {
+    const existing = entries.find((e) => e.id === entryId);
+    if (!existing) return;
+    const merged = { ...existing, ...patch };
+    if (!tachesEcart.includes(merged.tache)) {
+      merged.heuresPayees = merged.heuresEffectives;
     }
-    updateEntries(next);
+    updateEntries(entries.map((e) => (e.id === entryId ? merged : e)));
   };
 
-  const togglePresent = (empId) => {
-    const existing = rowFor(empId);
-    if (existing) {
-      setRow(empId, { present: !existing.present });
+  const addSegment = (empId) => {
+    const base = {
+      id: uid(),
+      date: selectedDate,
+      employeeId: empId,
+      present: true,
+      heuresEffectives: heuresDefaut,
+      heuresPayees: heuresDefaut,
+      tache: taches[0],
+      parcelle: "",
+      note: "",
+    };
+    if (!tachesEcart.includes(base.tache)) base.heuresPayees = base.heuresEffectives;
+    // Si une entrée d'absence existait pour ce jour, on la retire en ajoutant le premier poste
+    const abs = absenceFor(empId);
+    const next = abs ? entries.filter((e) => e.id !== abs.id) : entries;
+    updateEntries([...next, base]);
+  };
+
+  const removeSegment = (entryId) => {
+    updateEntries(entries.filter((e) => e.id !== entryId));
+  };
+
+  const setMotif = (empId, motif) => {
+    const abs = absenceFor(empId);
+    if (abs) {
+      updateEntries(entries.map((e) => (e.id === abs.id ? { ...e, motif } : e)));
     } else {
-      setRow(empId, { present: true });
+      updateEntries([
+        ...entries,
+        { id: uid(), date: selectedDate, employeeId: empId, present: false, motif, heuresEffectives: 0, heuresPayees: 0, tache: taches[0], parcelle: "", note: "" },
+      ]);
     }
   };
 
@@ -474,27 +484,23 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
 
   const bulkSeparee = tachesEcart.includes(bulkTache);
 
+  // Ajoute un nouveau poste (segment) à chaque salarié sélectionné, sans écraser ceux déjà pointés
   const applyBulk = () => {
-    let next = entries;
-    selected.forEach((empId) => {
-      const existing = next.find((e) => e.date === selectedDate && e.employeeId === empId);
-      const patch = {
-        present: true,
-        tache: bulkTache,
-        heuresEffectives: bulkEff,
-        heuresPayees: bulkSeparee ? bulkPaye : bulkEff,
-        parcelle: bulkParcelle,
-      };
-      if (existing) {
-        next = next.map((e) => (e.id === existing.id ? { ...e, ...patch } : e));
-      } else {
-        next = [
-          ...next,
-          { id: uid(), date: selectedDate, employeeId: empId, note: "", ...patch },
-        ];
-      }
-    });
-    updateEntries(next);
+    const additions = selected.map((empId) => ({
+      id: uid(),
+      date: selectedDate,
+      employeeId: empId,
+      present: true,
+      tache: bulkTache,
+      heuresEffectives: bulkEff,
+      heuresPayees: bulkSeparee ? bulkPaye : bulkEff,
+      parcelle: bulkParcelle,
+      note: "",
+    }));
+    // Retire les éventuelles entrées d'absence des salariés sélectionnés
+    const absentIds = new Set(selected.map((id) => absenceFor(id)?.id).filter(Boolean));
+    const next = entries.filter((e) => !absentIds.has(e.id));
+    updateEntries([...next, ...additions]);
     setSelected([]);
     setBulkParcelle("");
   };
@@ -503,7 +509,8 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
     return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés » pour commencer le pointage." />;
   }
 
-  const totalPresents = dayEntries.filter((e) => e.present).length;
+  const presentEmpIds = new Set(dayEntries.filter((e) => e.present).map((e) => e.employeeId));
+  const totalPresents = presentEmpIds.size;
   const totalEff = dayEntries.filter((e) => e.present).reduce((s, e) => s + Number(e.heuresEffectives || 0), 0);
   const totalPaye = dayEntries.filter((e) => e.present).reduce((s, e) => s + Number(e.heuresPayees ?? e.heuresEffectives ?? 0), 0);
 
@@ -614,7 +621,7 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
             style={{ background: PALETTE.green }}
             className="px-4 py-1.5 rounded text-white text-sm font-medium"
           >
-            Appliquer
+            Ajouter ce poste
           </button>
           <button onClick={() => setSelected([])} className="text-sm" style={{ color: "#8A8271" }}>
             Annuler
@@ -624,10 +631,9 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
 
       <div className="space-y-2">
         {employees.map((emp) => {
-          const row = rowFor(emp.id);
-          const present = row ? row.present : false;
-          const tache = row?.tache ?? taches[0];
-          const separee = tachesEcart.includes(tache);
+          const segments = segmentsFor(emp.id);
+          const abs = absenceFor(emp.id);
+          const present = segments.length > 0;
           const isSelected = selected.includes(emp.id);
           return (
             <div
@@ -639,7 +645,7 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
               }}
               className="rounded-md p-3"
             >
-              <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-3 flex-wrap mb-1.5">
                 <input
                   type="checkbox"
                   checked={isSelected}
@@ -648,22 +654,56 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                   style={{ accentColor: PALETTE.green }}
                   title="Sélectionner pour un pointage groupé"
                 />
-                <button
-                  onClick={() => togglePresent(emp.id)}
-                  className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-white font-bold text-xs transition-colors"
-                  style={{ background: present ? PALETTE.green : "#C9C2AC" }}
-                  title={present ? "Présent — cliquer pour marquer absent" : "Absent — cliquer pour marquer présent"}
-                >
-                  {present ? "✓" : ""}
-                </button>
                 <div className="min-w-[140px] font-medium">{emp.nom}</div>
-
                 {present && (
+                  <span className="text-xs" style={{ color: "#8A8271" }}>
+                    {segments.length} poste{segments.length > 1 ? "s" : ""}
+                  </span>
+                )}
+                <button
+                  onClick={() => addSegment(emp.id)}
+                  className="text-xs px-2 py-1 rounded flex items-center gap-1"
+                  style={{ border: `1px solid ${PALETTE.green}`, color: PALETTE.green }}
+                >
+                  <Plus size={12} /> {present ? "Ajouter un poste" : "Marquer présent"}
+                </button>
+                {!present && (
                   <>
+                    <span className="text-sm italic" style={{ color: "#B5AA88" }}>
+                      Absent ce jour
+                    </span>
                     <select
-                      value={tache}
-                      onChange={(e) => setRow(emp.id, { tache: e.target.value })}
-                      className="px-2 py-1.5 rounded border text-sm min-w-[170px]"
+                      value={abs?.motif ?? ""}
+                      onChange={(e) => setMotif(emp.id, e.target.value)}
+                      className="px-2 py-1 rounded border text-xs"
+                      style={{ borderColor: PALETTE.line, background: "#fff", color: "#6B6552" }}
+                    >
+                      <option value="">Motif (optionnel)</option>
+                      {ABSENCE_MOTIFS.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+              </div>
+
+              {segments.map((seg, i) => {
+                const separee = tachesEcart.includes(seg.tache);
+                return (
+                  <div
+                    key={seg.id}
+                    className="flex items-center gap-2 flex-wrap ml-7 mt-1.5 pl-2"
+                    style={{ borderLeft: `2px solid ${PALETTE.line}` }}
+                  >
+                    <span className="text-xs w-4 shrink-0" style={{ color: "#8A8271" }}>
+                      {i + 1}.
+                    </span>
+                    <select
+                      value={seg.tache}
+                      onChange={(e) => updateSegment(seg.id, { tache: e.target.value })}
+                      className="px-2 py-1.5 rounded border text-sm min-w-[160px]"
                       style={{ borderColor: PALETTE.line, background: "#fff" }}
                     >
                       {taches.map((t) => (
@@ -680,9 +720,9 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                         step="0.25"
                         min="0"
                         max="24"
-                        value={row?.heuresEffectives ?? heuresDefaut}
+                        value={seg.heuresEffectives ?? heuresDefaut}
                         onChange={(e) =>
-                          setRow(emp.id, {
+                          updateSegment(seg.id, {
                             heuresEffectives: e.target.value,
                             ...(separee ? {} : { heuresPayees: e.target.value }),
                           })
@@ -691,7 +731,7 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                         style={{ borderColor: PALETTE.line, background: "#fff" }}
                       />
                       <span className="text-xs" style={{ color: "#8A8271" }}>
-                        {separee ? "h effectives" : "heures"}
+                        {separee ? "h eff." : "heures"}
                       </span>
                     </div>
 
@@ -702,8 +742,8 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                           step="0.25"
                           min="0"
                           max="24"
-                          value={row?.heuresPayees ?? row?.heuresEffectives ?? heuresDefaut}
-                          onChange={(e) => setRow(emp.id, { heuresPayees: e.target.value })}
+                          value={seg.heuresPayees ?? seg.heuresEffectives ?? heuresDefaut}
+                          onChange={(e) => updateSegment(seg.id, { heuresPayees: e.target.value })}
                           className="w-20 px-2 py-1.5 rounded border text-sm"
                           style={{ borderColor: PALETTE.rust, background: "#FBF0E9" }}
                         />
@@ -716,34 +756,22 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                     <input
                       type="text"
                       placeholder="Parcelle (ex: P4)"
-                      value={row?.parcelle ?? ""}
-                      onChange={(e) => setRow(emp.id, { parcelle: e.target.value })}
+                      value={seg.parcelle ?? ""}
+                      onChange={(e) => updateSegment(seg.id, { parcelle: e.target.value })}
                       className="px-2 py-1.5 rounded border text-sm w-32"
                       style={{ borderColor: PALETTE.line, background: "#fff" }}
                     />
-                  </>
-                )}
-                {!present && (
-                  <>
-                    <span className="text-sm italic" style={{ color: "#B5AA88" }}>
-                      Absent ce jour
-                    </span>
-                    <select
-                      value={row?.motif ?? ""}
-                      onChange={(e) => setRow(emp.id, { present: false, motif: e.target.value })}
-                      className="px-2 py-1 rounded border text-xs"
-                      style={{ borderColor: PALETTE.line, background: "#fff", color: "#6B6552" }}
+                    <button
+                      onClick={() => removeSegment(seg.id)}
+                      className="p-1.5 rounded hover:bg-black/5"
+                      style={{ color: PALETTE.rust }}
+                      title="Supprimer ce poste"
                     >
-                      <option value="">Motif (optionnel)</option>
-                      {ABSENCE_MOTIFS.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))}
-                    </select>
-                  </>
-                )}
-              </div>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           );
         })}
@@ -2047,18 +2075,24 @@ function CongesAbsences({ employees, updateEmployees, entries, updateEntries, ta
       setMsg("Aucun jour ouvré dans cette plage (uniquement des week-ends).");
       return;
     }
-    let next = entries;
+    // Retire toutes les entrées existantes de ce salarié sur ces dates (postes ou absence), puis pose l'absence
+    let next = entries.filter((e) => !(e.employeeId === employeeId && dates.includes(e.date)));
     dates.forEach((date) => {
-      const existing = next.find((e) => e.date === date && e.employeeId === employeeId);
-      const patch = { present: false, motif, heuresEffectives: 0, heuresPayees: 0 };
-      if (existing) {
-        next = next.map((e) => (e.id === existing.id ? { ...e, ...patch } : e));
-      } else {
-        next = [
-          ...next,
-          { id: uid(), date, employeeId, tache: taches[0], parcelle: "", note: "", ...patch },
-        ];
-      }
+      next = [
+        ...next,
+        {
+          id: uid(),
+          date,
+          employeeId,
+          present: false,
+          motif,
+          heuresEffectives: 0,
+          heuresPayees: 0,
+          tache: taches[0],
+          parcelle: "",
+          note: "",
+        },
+      ];
     });
     updateEntries(next);
     setMsg(`${dates.length} jour(s) enregistré(s) en « ${motif} ».`);
