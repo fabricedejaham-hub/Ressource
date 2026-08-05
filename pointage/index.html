@@ -72,6 +72,8 @@ const TrendingUp = mkIcon("📈");
 const Wallet = mkIcon("💰");
 const Calculator = mkIcon("🧮");
 const CalendarX = mkIcon("📅");
+const FileText = mkIcon("📄");
+const CalendarDays = mkIcon("🗓");
 
 
 // ---------- Helpers ----------
@@ -125,6 +127,9 @@ const DEFAULT_HS = {
   tauxMajo2: 50, // % au-delà
 };
 
+// Taux moyen indicatif de cotisations sociales salariales (non-cadre) — à ajuster avec votre bulletin de paie réel
+const DEFAULT_TAUX_COTISATIONS = 22;
+
 // Lundi de la semaine ISO contenant la date donnée
 const weekStart = (iso) => {
   const d = new Date(iso + "T00:00:00");
@@ -139,6 +144,12 @@ const weekLabel = (mondayISO) => {
   end.setDate(end.getDate() + 6);
   const fmt = (d) => d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
   return `Semaine du ${fmt(start)} au ${fmt(end)}`;
+};
+
+// Vrai si la date (YYYY-MM-DD) tombe un samedi ou un dimanche
+const isWeekend = (iso) => {
+  const day = new Date(iso + "T00:00:00").getDay();
+  return day === 0 || day === 6;
 };
 
 // Calcule la répartition heures normales / majorées 1 / majorées 2 pour un total hebdo payé
@@ -162,6 +173,7 @@ function PointageApp() {
   const [taches, setTaches] = useState(DEFAULT_TACHES);
   const [heuresDefaut, setHeuresDefaut] = useState(7);
   const [heuresSup, setHeuresSup] = useState(DEFAULT_HS);
+  const [tauxCotisations, setTauxCotisations] = useState(DEFAULT_TAUX_COTISATIONS);
   const [tab, setTab] = useState("pointage");
   const [selectedDate, setSelectedDate] = useState(todayISO());
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
@@ -195,6 +207,7 @@ function PointageApp() {
           setHeuresSup({ ...DEFAULT_HS, ...(cfg.heuresSup || {}) });
           setTaches(cfg.taches && cfg.taches.length > 0 ? cfg.taches : DEFAULT_TACHES);
           setHeuresDefaut(cfg.heuresDefaut ?? 7);
+          setTauxCotisations(cfg.tauxCotisations ?? DEFAULT_TAUX_COTISATIONS);
         }
       } catch (e) {
         console.error("Erreur de chargement", e);
@@ -239,22 +252,27 @@ function PointageApp() {
 
   const updateTachesEcart = (next) => {
     setTachesEcart(next);
-    persist("config", { tachesEcart: next, heuresSup, taches, heuresDefaut });
+    persist("config", { tachesEcart: next, heuresSup, taches, heuresDefaut, tauxCotisations });
   };
 
   const updateHeuresSup = (next) => {
     setHeuresSup(next);
-    persist("config", { tachesEcart, heuresSup: next, taches, heuresDefaut });
+    persist("config", { tachesEcart, heuresSup: next, taches, heuresDefaut, tauxCotisations });
   };
 
   const updateTaches = (next) => {
     setTaches(next);
-    persist("config", { tachesEcart, heuresSup, taches: next, heuresDefaut });
+    persist("config", { tachesEcart, heuresSup, taches: next, heuresDefaut, tauxCotisations });
   };
 
   const updateHeuresDefaut = (next) => {
     setHeuresDefaut(next);
-    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut: next });
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut: next, tauxCotisations });
+  };
+
+  const updateTauxCotisations = (next) => {
+    setTauxCotisations(next);
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut, tauxCotisations: next });
   };
 
   if (loading) {
@@ -299,10 +317,16 @@ function PointageApp() {
           <Avances employees={employees} transactions={transactions} updateTransactions={updateTransactions} />
         )}
         {tab === "recap" && <Recap employees={employees} entries={entries} />}
+        {tab === "synthese" && (
+          <SyntheseSalarie employees={employees} entries={entries} transactions={transactions} heuresSup={heuresSup} tauxCotisations={tauxCotisations} />
+        )}
         {tab === "absences" && <Absences employees={employees} entries={entries} />}
+        {tab === "conges" && (
+          <CongesAbsences employees={employees} updateEmployees={updateEmployees} entries={entries} updateEntries={updateEntries} taches={taches} />
+        )}
         {tab === "heuresSup" && <HeuresSup employees={employees} entries={entries} heuresSup={heuresSup} />}
         {tab === "simulation" && (
-          <SimulationPaie employees={employees} entries={entries} transactions={transactions} heuresSup={heuresSup} />
+          <SimulationPaie employees={employees} entries={entries} transactions={transactions} heuresSup={heuresSup} tauxCotisations={tauxCotisations} />
         )}
         {tab === "parametres" && (
           <Parametres
@@ -314,6 +338,8 @@ function PointageApp() {
             updateTaches={updateTaches}
             heuresDefaut={heuresDefaut}
             updateHeuresDefaut={updateHeuresDefaut}
+            tauxCotisations={tauxCotisations}
+            updateTauxCotisations={updateTauxCotisations}
             employees={employees}
             updateEmployees={updateEmployees}
             teams={teams}
@@ -357,7 +383,9 @@ function TabBar({ tab, setTab }) {
     { id: "equipes", label: "Équipes", icon: Users2 },
     { id: "avances", label: "Avances", icon: Wallet },
     { id: "recap", label: "Récapitulatif", icon: BarChart3 },
+    { id: "synthese", label: "Synthèse salarié", icon: FileText },
     { id: "absences", label: "Absences", icon: CalendarX },
+    { id: "conges", label: "Congés & absences", icon: CalendarDays },
     { id: "heuresSup", label: "Heures sup", icon: TrendingUp },
     { id: "simulation", label: "Simulation paie", icon: Calculator },
     { id: "parametres", label: "Paramètres", icon: Settings },
@@ -407,43 +435,53 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
     setSelectedDate(d.toISOString().slice(0, 10));
   };
 
-  const rowFor = (empId) => dayEntries.find((e) => e.employeeId === empId);
+  // Tous les postes (segments) du jour pour un salarié
+  const segmentsFor = (empId) => dayEntries.filter((e) => e.employeeId === empId && e.present);
+  // Entrée d'absence éventuelle (pas de segment présent, mais un motif a pu être saisi)
+  const absenceFor = (empId) => dayEntries.find((e) => e.employeeId === empId && !e.present);
 
-  const setRow = (empId, patch) => {
-    const existing = rowFor(empId);
-    let next;
-    if (existing) {
-      const merged = { ...existing, ...patch };
-      // si la tâche change et n'est plus une tâche à écart, aligner heures payées sur heures effectives
-      if (!tachesEcart.includes(merged.tache)) {
-        merged.heuresPayees = merged.heuresEffectives;
-      }
-      next = entries.map((e) => (e.id === existing.id ? merged : e));
-    } else {
-      const base = {
-        id: uid(),
-        date: selectedDate,
-        employeeId: empId,
-        present: true,
-        heuresEffectives: heuresDefaut,
-        heuresPayees: heuresDefaut,
-        tache: taches[0],
-        parcelle: "",
-        note: "",
-        ...patch,
-      };
-      if (!tachesEcart.includes(base.tache)) base.heuresPayees = base.heuresEffectives;
-      next = [...entries, base];
+  const updateSegment = (entryId, patch) => {
+    const existing = entries.find((e) => e.id === entryId);
+    if (!existing) return;
+    const merged = { ...existing, ...patch };
+    if (!tachesEcart.includes(merged.tache)) {
+      merged.heuresPayees = merged.heuresEffectives;
     }
-    updateEntries(next);
+    updateEntries(entries.map((e) => (e.id === entryId ? merged : e)));
   };
 
-  const togglePresent = (empId) => {
-    const existing = rowFor(empId);
-    if (existing) {
-      setRow(empId, { present: !existing.present });
+  const addSegment = (empId) => {
+    const base = {
+      id: uid(),
+      date: selectedDate,
+      employeeId: empId,
+      present: true,
+      heuresEffectives: heuresDefaut,
+      heuresPayees: heuresDefaut,
+      tache: taches[0],
+      parcelle: "",
+      note: "",
+    };
+    if (!tachesEcart.includes(base.tache)) base.heuresPayees = base.heuresEffectives;
+    // Si une entrée d'absence existait pour ce jour, on la retire en ajoutant le premier poste
+    const abs = absenceFor(empId);
+    const next = abs ? entries.filter((e) => e.id !== abs.id) : entries;
+    updateEntries([...next, base]);
+  };
+
+  const removeSegment = (entryId) => {
+    updateEntries(entries.filter((e) => e.id !== entryId));
+  };
+
+  const setMotif = (empId, motif) => {
+    const abs = absenceFor(empId);
+    if (abs) {
+      updateEntries(entries.map((e) => (e.id === abs.id ? { ...e, motif } : e)));
     } else {
-      setRow(empId, { present: true });
+      updateEntries([
+        ...entries,
+        { id: uid(), date: selectedDate, employeeId: empId, present: false, motif, heuresEffectives: 0, heuresPayees: 0, tache: taches[0], parcelle: "", note: "" },
+      ]);
     }
   };
 
@@ -458,27 +496,23 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
 
   const bulkSeparee = tachesEcart.includes(bulkTache);
 
+  // Ajoute un nouveau poste (segment) à chaque salarié sélectionné, sans écraser ceux déjà pointés
   const applyBulk = () => {
-    let next = entries;
-    selected.forEach((empId) => {
-      const existing = next.find((e) => e.date === selectedDate && e.employeeId === empId);
-      const patch = {
-        present: true,
-        tache: bulkTache,
-        heuresEffectives: bulkEff,
-        heuresPayees: bulkSeparee ? bulkPaye : bulkEff,
-        parcelle: bulkParcelle,
-      };
-      if (existing) {
-        next = next.map((e) => (e.id === existing.id ? { ...e, ...patch } : e));
-      } else {
-        next = [
-          ...next,
-          { id: uid(), date: selectedDate, employeeId: empId, note: "", ...patch },
-        ];
-      }
-    });
-    updateEntries(next);
+    const additions = selected.map((empId) => ({
+      id: uid(),
+      date: selectedDate,
+      employeeId: empId,
+      present: true,
+      tache: bulkTache,
+      heuresEffectives: bulkEff,
+      heuresPayees: bulkSeparee ? bulkPaye : bulkEff,
+      parcelle: bulkParcelle,
+      note: "",
+    }));
+    // Retire les éventuelles entrées d'absence des salariés sélectionnés
+    const absentIds = new Set(selected.map((id) => absenceFor(id)?.id).filter(Boolean));
+    const next = entries.filter((e) => !absentIds.has(e.id));
+    updateEntries([...next, ...additions]);
     setSelected([]);
     setBulkParcelle("");
   };
@@ -487,7 +521,8 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
     return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés » pour commencer le pointage." />;
   }
 
-  const totalPresents = dayEntries.filter((e) => e.present).length;
+  const presentEmpIds = new Set(dayEntries.filter((e) => e.present).map((e) => e.employeeId));
+  const totalPresents = presentEmpIds.size;
   const totalEff = dayEntries.filter((e) => e.present).reduce((s, e) => s + Number(e.heuresEffectives || 0), 0);
   const totalPaye = dayEntries.filter((e) => e.present).reduce((s, e) => s + Number(e.heuresPayees ?? e.heuresEffectives ?? 0), 0);
 
@@ -598,7 +633,7 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
             style={{ background: PALETTE.green }}
             className="px-4 py-1.5 rounded text-white text-sm font-medium"
           >
-            Appliquer
+            Ajouter ce poste
           </button>
           <button onClick={() => setSelected([])} className="text-sm" style={{ color: "#8A8271" }}>
             Annuler
@@ -608,10 +643,9 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
 
       <div className="space-y-2">
         {employees.map((emp) => {
-          const row = rowFor(emp.id);
-          const present = row ? row.present : false;
-          const tache = row?.tache ?? taches[0];
-          const separee = tachesEcart.includes(tache);
+          const segments = segmentsFor(emp.id);
+          const abs = absenceFor(emp.id);
+          const present = segments.length > 0;
           const isSelected = selected.includes(emp.id);
           return (
             <div
@@ -623,7 +657,7 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
               }}
               className="rounded-md p-3"
             >
-              <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-3 flex-wrap mb-1.5">
                 <input
                   type="checkbox"
                   checked={isSelected}
@@ -632,22 +666,56 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                   style={{ accentColor: PALETTE.green }}
                   title="Sélectionner pour un pointage groupé"
                 />
-                <button
-                  onClick={() => togglePresent(emp.id)}
-                  className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-white font-bold text-xs transition-colors"
-                  style={{ background: present ? PALETTE.green : "#C9C2AC" }}
-                  title={present ? "Présent — cliquer pour marquer absent" : "Absent — cliquer pour marquer présent"}
-                >
-                  {present ? "✓" : ""}
-                </button>
                 <div className="min-w-[140px] font-medium">{emp.nom}</div>
-
                 {present && (
+                  <span className="text-xs" style={{ color: "#8A8271" }}>
+                    {segments.length} poste{segments.length > 1 ? "s" : ""}
+                  </span>
+                )}
+                <button
+                  onClick={() => addSegment(emp.id)}
+                  className="text-xs px-2 py-1 rounded flex items-center gap-1"
+                  style={{ border: `1px solid ${PALETTE.green}`, color: PALETTE.green }}
+                >
+                  <Plus size={12} /> {present ? "Ajouter un poste" : "Marquer présent"}
+                </button>
+                {!present && (
                   <>
+                    <span className="text-sm italic" style={{ color: "#B5AA88" }}>
+                      Absent ce jour
+                    </span>
                     <select
-                      value={tache}
-                      onChange={(e) => setRow(emp.id, { tache: e.target.value })}
-                      className="px-2 py-1.5 rounded border text-sm min-w-[170px]"
+                      value={abs?.motif ?? ""}
+                      onChange={(e) => setMotif(emp.id, e.target.value)}
+                      className="px-2 py-1 rounded border text-xs"
+                      style={{ borderColor: PALETTE.line, background: "#fff", color: "#6B6552" }}
+                    >
+                      <option value="">Motif (optionnel)</option>
+                      {ABSENCE_MOTIFS.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+              </div>
+
+              {segments.map((seg, i) => {
+                const separee = tachesEcart.includes(seg.tache);
+                return (
+                  <div
+                    key={seg.id}
+                    className="flex items-center gap-2 flex-wrap ml-7 mt-1.5 pl-2"
+                    style={{ borderLeft: `2px solid ${PALETTE.line}` }}
+                  >
+                    <span className="text-xs w-4 shrink-0" style={{ color: "#8A8271" }}>
+                      {i + 1}.
+                    </span>
+                    <select
+                      value={seg.tache}
+                      onChange={(e) => updateSegment(seg.id, { tache: e.target.value })}
+                      className="px-2 py-1.5 rounded border text-sm min-w-[160px]"
                       style={{ borderColor: PALETTE.line, background: "#fff" }}
                     >
                       {taches.map((t) => (
@@ -664,9 +732,9 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                         step="0.25"
                         min="0"
                         max="24"
-                        value={row?.heuresEffectives ?? heuresDefaut}
+                        value={seg.heuresEffectives ?? heuresDefaut}
                         onChange={(e) =>
-                          setRow(emp.id, {
+                          updateSegment(seg.id, {
                             heuresEffectives: e.target.value,
                             ...(separee ? {} : { heuresPayees: e.target.value }),
                           })
@@ -675,7 +743,7 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                         style={{ borderColor: PALETTE.line, background: "#fff" }}
                       />
                       <span className="text-xs" style={{ color: "#8A8271" }}>
-                        {separee ? "h effectives" : "heures"}
+                        {separee ? "h eff." : "heures"}
                       </span>
                     </div>
 
@@ -686,8 +754,8 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                           step="0.25"
                           min="0"
                           max="24"
-                          value={row?.heuresPayees ?? row?.heuresEffectives ?? heuresDefaut}
-                          onChange={(e) => setRow(emp.id, { heuresPayees: e.target.value })}
+                          value={seg.heuresPayees ?? seg.heuresEffectives ?? heuresDefaut}
+                          onChange={(e) => updateSegment(seg.id, { heuresPayees: e.target.value })}
                           className="w-20 px-2 py-1.5 rounded border text-sm"
                           style={{ borderColor: PALETTE.rust, background: "#FBF0E9" }}
                         />
@@ -700,34 +768,22 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
                     <input
                       type="text"
                       placeholder="Parcelle (ex: P4)"
-                      value={row?.parcelle ?? ""}
-                      onChange={(e) => setRow(emp.id, { parcelle: e.target.value })}
+                      value={seg.parcelle ?? ""}
+                      onChange={(e) => updateSegment(seg.id, { parcelle: e.target.value })}
                       className="px-2 py-1.5 rounded border text-sm w-32"
                       style={{ borderColor: PALETTE.line, background: "#fff" }}
                     />
-                  </>
-                )}
-                {!present && (
-                  <>
-                    <span className="text-sm italic" style={{ color: "#B5AA88" }}>
-                      Absent ce jour
-                    </span>
-                    <select
-                      value={row?.motif ?? ""}
-                      onChange={(e) => setRow(emp.id, { present: false, motif: e.target.value })}
-                      className="px-2 py-1 rounded border text-xs"
-                      style={{ borderColor: PALETTE.line, background: "#fff", color: "#6B6552" }}
+                    <button
+                      onClick={() => removeSegment(seg.id)}
+                      className="p-1.5 rounded hover:bg-black/5"
+                      style={{ color: PALETTE.rust }}
+                      title="Supprimer ce poste"
                     >
-                      <option value="">Motif (optionnel)</option>
-                      {ABSENCE_MOTIFS.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))}
-                    </select>
-                  </>
-                )}
-              </div>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           );
         })}
@@ -1204,6 +1260,8 @@ function Parametres({
   updateTaches,
   heuresDefaut,
   updateHeuresDefaut,
+  tauxCotisations,
+  updateTauxCotisations,
   employees,
   updateEmployees,
   teams,
@@ -1399,6 +1457,30 @@ function Parametres({
                 h
               </span>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="font-semibold mb-1">Cotisations sociales salariales</h2>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Taux moyen déduit du brut pour estimer le net à payer dans Simulation paie et Synthèse salarié. La valeur
+          par défaut (22%) est indicative — vérifiez le taux réel sur un bulletin de paie de votre exploitation,
+          il varie selon le statut et les caisses agricoles (MSA).
+        </p>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm">Taux de cotisations salariales (%)</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              max="100"
+              value={tauxCotisations}
+              onChange={(e) => updateTauxCotisations(e.target.value)}
+              className="w-24 px-2 py-1.5 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
           </div>
         </div>
       </div>
@@ -1637,7 +1719,7 @@ function HeuresSup({ employees, entries, heuresSup }) {
 
 // ---------- Récapitulatif (summary + export) ----------
 // ---------- Simulation de paie (brut estimé + avances/acomptes/prêts) ----------
-function SimulationPaie({ employees, entries, transactions, heuresSup }) {
+function SimulationPaie({ employees, entries, transactions, heuresSup, tauxCotisations }) {
   const [start, setStart] = useState(() => {
     const d = new Date();
     d.setDate(1);
@@ -1698,13 +1780,15 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
         b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
         b.extraPaye * r
       : 0;
+    const cotisations = brut * (Number(tauxCotisations) / 100);
     const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0 };
     const deductions = m.avance + m.acompte;
-    const net = brut - deductions;
-    return { emp, b, brut, m, deductions, net };
+    const net = brut - cotisations - deductions;
+    return { emp, b, brut, cotisations, m, deductions, net };
   });
 
   const totalBrut = lignes.reduce((s, l) => s + l.brut, 0);
+  const totalCotisations = lignes.reduce((s, l) => s + l.cotisations, 0);
   const totalDeductions = lignes.reduce((s, l) => s + l.deductions, 0);
   const totalNet = lignes.reduce((s, l) => s + l.net, 0);
 
@@ -1716,6 +1800,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
         "Heures majo 1",
         "Heures majo 2",
         "Brut estimé (€)",
+        "Cotisations salariales (€)",
         "Avances/acomptes période (€)",
         "Net estimé (€)",
       ],
@@ -1727,6 +1812,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
         l.b.majo1.toFixed(2),
         l.b.majo2.toFixed(2),
         l.brut.toFixed(2),
+        l.cotisations.toFixed(2),
         l.deductions.toFixed(2),
         l.net.toFixed(2),
       ]);
@@ -1797,12 +1883,13 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
 
       <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
         Estimation indicative à partir des heures pointées, du taux horaire de chaque salarié et des seuils
-        d'heures sup réglés dans Paramètres. Les avances et acomptes de la période sont déduits du brut. Les
-        cotisations sociales et charges ne sont pas incluses — ceci n'est pas une fiche de paie officielle.
+        d'heures sup réglés dans Paramètres. Le net déduit un taux de cotisations sociales estimé ({tauxCotisations}%,
+        réglable dans Paramètres) ainsi que les avances/acomptes de la période — ceci reste indicatif, pas une
+        fiche de paie officielle.
       </p>
 
       <div className="space-y-2">
-        {lignes.map(({ emp, b, brut, m, deductions, net }) => {
+        {lignes.map(({ emp, b, brut, cotisations, m, deductions, net }) => {
           const hasRate = Number(emp.tauxHoraire) > 0;
           return (
             <div
@@ -1829,6 +1916,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
                     {b.extraPaye > 0 ? ` · +${fmtHours(b.extraPaye)} payées hors travail effectif` : ""}
                   </span>
                   <span>Brut estimé : {fmtEuros(brut)}</span>
+                  <span style={{ color: PALETTE.rust }}>− Cotisations ({tauxCotisations}%) : {fmtEuros(cotisations)}</span>
                   {deductions > 0 && <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(deductions)}</span>}
                   {m.pret > 0 && <span>Prêt(s) versé(s) : {fmtEuros(m.pret)} (non déduit du net, voir Avances)</span>}
                   {m.remboursement > 0 && <span>Remboursement reçu : {fmtEuros(m.remboursement)}</span>}
@@ -1844,6 +1932,7 @@ function SimulationPaie({ employees, entries, transactions, heuresSup }) {
         className="rounded-md p-3 mt-4 flex flex-wrap justify-between gap-2 text-sm font-semibold"
       >
         <span>Total brut estimé : {fmtEuros(totalBrut)}</span>
+        <span style={{ color: PALETTE.rust }}>− Cotisations : {fmtEuros(totalCotisations)}</span>
         <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(totalDeductions)}</span>
         <span style={{ color: PALETTE.green }}>= Net estimé : {fmtEuros(totalNet)}</span>
       </div>
@@ -1863,10 +1952,12 @@ function Absences({ employees, entries }) {
 
   const filtered = entries.filter((e) => e.date >= start && e.date <= end);
 
-  // Jours où au moins un pointage a été fait (pour ne pas compter les jours non travaillés)
+  // Jours où au moins un pointage a été fait (pour ne pas compter les jours non travaillés), hors week-ends
   const joursPointes = useMemo(() => {
     const set = new Set(filtered.map((e) => e.date));
-    return Array.from(set).sort();
+    return Array.from(set)
+      .filter((d) => !isWeekend(d))
+      .sort();
   }, [filtered]);
 
   // Pour chaque salarié : liste des jours pointés où il n'était pas présent
@@ -1995,6 +2086,598 @@ function Absences({ employees, entries }) {
   );
 }
 
+// ---------- Congés & absences (déclaration multi-jours + solde CP) ----------
+function CongesAbsences({ employees, updateEmployees, entries, updateEntries, taches }) {
+  const [employeeId, setEmployeeId] = useState(employees[0]?.id || "");
+  const [motif, setMotif] = useState(ABSENCE_MOTIFS[0]);
+  const [debut, setDebut] = useState(todayISO());
+  const [fin, setFin] = useState(todayISO());
+  const [filterEmp, setFilterEmp] = useState("all");
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    if (!employeeId && employees.length > 0) setEmployeeId(employees[0].id);
+  }, [employees, employeeId]);
+
+  // Liste des dates (jours ouvrés, hors week-ends) entre début et fin inclus
+  const datesRange = (d1, d2) => {
+    const dates = [];
+    let cur = new Date(d1 + "T00:00:00");
+    const last = new Date(d2 + "T00:00:00");
+    while (cur <= last) {
+      const iso = cur.toISOString().slice(0, 10);
+      // Jours ouvrables : le samedi compte, seul le dimanche est exclu
+      if (cur.getDay() !== 0) dates.push(iso);
+      cur.setDate(cur.getDate() + 1);
+    }
+    return dates;
+  };
+
+  const declarer = () => {
+    if (!employeeId || !debut || !fin || debut > fin) return;
+    const dates = datesRange(debut, fin);
+    if (dates.length === 0) {
+      setMsg("Aucun jour ouvré dans cette plage (uniquement des week-ends).");
+      return;
+    }
+    // Retire toutes les entrées existantes de ce salarié sur ces dates (postes ou absence), puis pose l'absence
+    let next = entries.filter((e) => !(e.employeeId === employeeId && dates.includes(e.date)));
+    dates.forEach((date) => {
+      next = [
+        ...next,
+        {
+          id: uid(),
+          date,
+          employeeId,
+          present: false,
+          motif,
+          heuresEffectives: 0,
+          heuresPayees: 0,
+          tache: taches[0],
+          parcelle: "",
+          note: "",
+        },
+      ];
+    });
+    updateEntries(next);
+    setMsg(`${dates.length} jour(s) enregistré(s) en « ${motif} ».`);
+  };
+
+  // Toutes les absences/congés explicitement déclarés (motif renseigné)
+  const declarations = entries
+    .filter((e) => !e.present && e.motif && (filterEmp === "all" || e.employeeId === filterEmp))
+    .slice()
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const supprimer = (id) => {
+    updateEntries(entries.filter((e) => e.id !== id));
+  };
+
+  const updateJoursAcquis = (empId, value) => {
+    updateEmployees(employees.map((e) => (e.id === empId ? { ...e, joursCPAcquis: value } : e)));
+  };
+
+  // Solde congés payés par salarié : jours acquis (saisi manuellement) - jours de CP pris (tous temps)
+  const soldesCP = employees.map((emp) => {
+    const pris = entries.filter((e) => e.employeeId === emp.id && !e.present && e.motif === "Congé payé").length;
+    const acquis = Number(emp.joursCPAcquis) || 0;
+    return { emp, pris, acquis, solde: acquis - pris };
+  });
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  return (
+    <div>
+      {/* Déclarer un congé/absence */}
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4 mb-6">
+        <h2 className="font-semibold mb-3">Déclarer un congé ou une absence</h2>
+        <div className="flex flex-wrap gap-2 items-end">
+          <div>
+            <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+              Salarié
+            </label>
+            <select
+              value={employeeId}
+              onChange={(e) => setEmployeeId(e.target.value)}
+              className="px-2 py-2 rounded border text-sm min-w-[150px]"
+              style={{ borderColor: PALETTE.line }}
+            >
+              {employees.map((emp) => (
+                <option key={emp.id} value={emp.id}>
+                  {emp.nom}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+              Motif
+            </label>
+            <select
+              value={motif}
+              onChange={(e) => setMotif(e.target.value)}
+              className="px-2 py-2 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            >
+              {ABSENCE_MOTIFS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+              Du
+            </label>
+            <input
+              type="date"
+              value={debut}
+              onChange={(e) => setDebut(e.target.value)}
+              className="px-2 py-2 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+              Au
+            </label>
+            <input
+              type="date"
+              value={fin}
+              onChange={(e) => setFin(e.target.value)}
+              className="px-2 py-2 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
+          </div>
+          <button
+            onClick={declarer}
+            style={{ background: PALETTE.green }}
+            className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+          >
+            <Plus size={16} /> Enregistrer
+          </button>
+        </div>
+        <p className="text-xs mt-2" style={{ color: "#8A8271" }}>
+          Comptage en jours ouvrables : le samedi est inclus, seul le dimanche est exclu automatiquement. Un jour
+          déjà pointé présent sera écrasé par cette
+          déclaration.
+        </p>
+        {msg && (
+          <p className="text-xs mt-2" style={{ color: PALETTE.green }}>
+            {msg}
+          </p>
+        )}
+      </div>
+
+      {/* Solde congés payés */}
+      <h3 className="font-semibold mb-2">Solde de congés payés</h3>
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden mb-6">
+        {soldesCP.map(({ emp, pris, acquis, solde }, i) => (
+          <div
+            key={emp.id}
+            className="flex items-center justify-between px-4 py-2.5 text-sm flex-wrap gap-2"
+            style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+          >
+            <span className="font-medium">{emp.nom}</span>
+            <div className="flex items-center gap-3 text-xs" style={{ color: "#8A8271" }}>
+              <span>Pris : {pris} j</span>
+              <span className="flex items-center gap-1">
+                Acquis :
+                <input
+                  type="number"
+                  step="0.5"
+                  value={emp.joursCPAcquis ?? ""}
+                  onChange={(e) => updateJoursAcquis(emp.id, e.target.value)}
+                  className="w-16 px-1.5 py-1 rounded border text-xs"
+                  style={{ borderColor: PALETTE.line }}
+                />
+                j
+              </span>
+              <span className="font-semibold" style={{ color: solde < 0 ? PALETTE.rust : PALETTE.green }}>
+                Solde : {solde} j
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-xs mb-6" style={{ color: "#8A8271" }}>
+        « Jours acquis » se met à jour manuellement (ex : 2,5 jours par mois travaillé selon la règle habituelle) —
+        le solde se recalcule automatiquement en fonction des congés payés déclarés ci-dessus.
+      </p>
+
+      {/* Historique des déclarations */}
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h3 className="font-semibold">Historique des déclarations</h3>
+        <select
+          value={filterEmp}
+          onChange={(e) => setFilterEmp(e.target.value)}
+          className="px-2 py-1.5 rounded border text-sm"
+          style={{ borderColor: PALETTE.line }}
+        >
+          <option value="all">Tous les salariés</option>
+          {employees.map((emp) => (
+            <option key={emp.id} value={emp.id}>
+              {emp.nom}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+        {declarations.length === 0 && (
+          <div className="p-3 text-sm" style={{ color: "#8A8271" }}>
+            Aucune déclaration.
+          </div>
+        )}
+        {declarations.map((d, i) => {
+          const emp = employees.find((e) => e.id === d.employeeId);
+          return (
+            <div
+              key={d.id}
+              className="flex items-center justify-between px-4 py-2.5 text-sm"
+              style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+            >
+              <span>
+                <span className="font-medium">{emp?.nom || "?"}</span>{" "}
+                <span style={{ color: "#8A8271" }}>
+                  · {d.date} · {d.motif}
+                </span>
+              </span>
+              <button onClick={() => supprimer(d.id)} className="p-1.5 rounded hover:bg-black/5" style={{ color: PALETTE.rust }}>
+                <Trash2 size={14} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
+// ---------- Synthèse par salarié (tout regroupé pour une période) ----------
+function SyntheseSalarie({ employees, entries, transactions, heuresSup, tauxCotisations }) {
+  const [employeeId, setEmployeeId] = useState(employees[0]?.id || "");
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(todayISO());
+
+  useEffect(() => {
+    if (!employeeId && employees.length > 0) setEmployeeId(employees[0].id);
+  }, [employees, employeeId]);
+
+  const emp = employees.find((e) => e.id === employeeId);
+
+  // Toutes les entrées de la période où du pointage a eu lieu (pour détecter présence/absence)
+  const joursPointes = useMemo(() => {
+    const set = new Set(entries.filter((e) => e.date >= start && e.date <= end).map((e) => e.date));
+    return Array.from(set)
+      .filter((d) => !isWeekend(d))
+      .sort();
+  }, [entries, start, end]);
+
+  const entriesEmp = useMemo(
+    () => entries.filter((e) => e.employeeId === employeeId && e.date >= start && e.date <= end),
+    [entries, employeeId, start, end]
+  );
+
+  const presences = entriesEmp.filter((e) => e.present);
+  const totalEff = presences.reduce((s, e) => s + Number(e.heuresEffectives || 0), 0);
+  const totalPaye = presences.reduce((s, e) => s + Number(e.heuresPayees ?? e.heuresEffectives ?? 0), 0);
+
+  // Heures sup : regroupement hebdo sur les heures effectives
+  const heuresSupCalc = useMemo(() => {
+    const weeks = {};
+    presences.forEach((e) => {
+      const wk = weekStart(e.date);
+      if (!weeks[wk]) weeks[wk] = { eff: 0, paye: 0 };
+      weeks[wk].eff += Number(e.heuresEffectives || 0);
+      weeks[wk].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+    });
+    let normales = 0,
+      majo1 = 0,
+      majo2 = 0,
+      extraPaye = 0;
+    Object.values(weeks).forEach(({ eff, paye }) => {
+      const s = splitOvertime(eff, heuresSup);
+      normales += s.normales;
+      majo1 += s.majo1;
+      majo2 += s.majo2;
+      extraPaye += Math.max(0, paye - eff);
+    });
+    return { normales, majo1, majo2, extraPaye };
+  }, [presences, heuresSup]);
+
+  // Répartition par tâche
+  const parTache = useMemo(() => {
+    const map = {};
+    presences.forEach((e) => {
+      if (!map[e.tache]) map[e.tache] = { eff: 0, paye: 0, jours: 0 };
+      map[e.tache].eff += Number(e.heuresEffectives || 0);
+      map[e.tache].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+      map[e.tache].jours += 1;
+    });
+    return Object.entries(map).sort((a, b) => b[1].paye - a[1].paye);
+  }, [presences]);
+
+  // Absences (jours pointés par d'autres où ce salarié n'était pas présent)
+  const absences = useMemo(() => {
+    return joursPointes
+      .filter((date) => {
+        const entry = entries.find((e) => e.date === date && e.employeeId === employeeId);
+        return !(entry && entry.present);
+      })
+      .map((date) => {
+        const entry = entries.find((e) => e.date === date && e.employeeId === employeeId);
+        return { date, motif: entry?.motif || "Non pointé" };
+      });
+  }, [joursPointes, entries, employeeId]);
+
+  // Avances / acomptes / prêts / remboursements
+  const mouvementsPeriode = transactions.filter(
+    (t) => t.employeeId === employeeId && t.date >= start && t.date <= end
+  );
+  const soldeTotal = transactions
+    .filter((t) => t.employeeId === employeeId)
+    .reduce((s, t) => s + (t.type === "remboursement" ? -t.montant : t.montant), 0);
+
+  // Estimation paie
+  const r = Number(emp?.tauxHoraire) || 0;
+  const brut = r
+    ? heuresSupCalc.normales * r +
+      heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
+      heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
+      heuresSupCalc.extraPaye * r
+    : 0;
+  const cotisations = brut * (Number(tauxCotisations) / 100);
+  const deductionsPeriode = mouvementsPeriode
+    .filter((t) => t.type === "avance" || t.type === "acompte")
+    .reduce((s, t) => s + t.montant, 0);
+  const net = brut - cotisations - deductionsPeriode;
+
+  const exportPDF = () => window.print();
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  return (
+    <div>
+      <div className="print-only mb-4">
+        <div className="font-bold text-lg">Synthèse salarié — Habitation Ressource</div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 mb-6 no-print">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Salarié
+          </label>
+          <select
+            value={employeeId}
+            onChange={(e) => setEmployeeId(e.target.value)}
+            className="px-2 py-2 rounded border text-sm min-w-[160px]"
+            style={{ borderColor: PALETTE.line }}
+          >
+            {employees.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.nom}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <button
+          onClick={exportPDF}
+          style={{ background: PALETTE.rust }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> PDF
+        </button>
+      </div>
+
+      {!emp ? (
+        <EmptyState text="Sélectionnez un salarié." />
+      ) : (
+        <div className="space-y-5">
+          {/* En-tête fiche */}
+          <div style={{ background: PALETTE.greenDark }} className="rounded-md p-4 text-white">
+            <div className="text-xl font-bold">{emp.nom}</div>
+            <div className="text-sm opacity-80">
+              {emp.poste || "Poste non renseigné"}
+              {emp.tauxHoraire ? ` · ${emp.tauxHoraire} €/h` : " · Taux horaire non renseigné"}
+            </div>
+            <div className="text-xs opacity-70 mt-1">
+              Du {start} au {end}
+            </div>
+          </div>
+
+          {/* Heures */}
+          <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4">
+            <h3 className="font-semibold mb-2">Heures</h3>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <div style={{ color: "#8A8271" }} className="text-xs">
+                  Jours présent
+                </div>
+                <div className="font-semibold">{presences.length}</div>
+              </div>
+              <div>
+                <div style={{ color: "#8A8271" }} className="text-xs">
+                  Heures effectives
+                </div>
+                <div className="font-semibold">{fmtHours(totalEff)}</div>
+              </div>
+              <div>
+                <div style={{ color: "#8A8271" }} className="text-xs">
+                  Heures payées
+                </div>
+                <div className="font-semibold">{fmtHours(totalPaye)}</div>
+              </div>
+              <div>
+                <div style={{ color: "#8A8271" }} className="text-xs">
+                  Dont majorées
+                </div>
+                <div className="font-semibold" style={{ color: PALETTE.rust }}>
+                  {fmtHours(heuresSupCalc.majo1 + heuresSupCalc.majo2)}
+                </div>
+              </div>
+            </div>
+            {(heuresSupCalc.majo1 > 0 || heuresSupCalc.majo2 > 0 || heuresSupCalc.extraPaye > 0) && (
+              <div className="text-xs mt-3 pt-3 flex flex-wrap gap-x-4 gap-y-1" style={{ borderTop: `1px solid ${PALETTE.line}`, color: "#6B6552" }}>
+                <span>Normales : {fmtHours(heuresSupCalc.normales)}</span>
+                {heuresSupCalc.majo1 > 0 && (
+                  <span>
+                    +{heuresSup.tauxMajo1}% : {fmtHours(heuresSupCalc.majo1)}
+                  </span>
+                )}
+                {heuresSupCalc.majo2 > 0 && (
+                  <span>
+                    +{heuresSup.tauxMajo2}% : {fmtHours(heuresSupCalc.majo2)}
+                  </span>
+                )}
+                {heuresSupCalc.extraPaye > 0 && <span>Payé hors travail effectif : {fmtHours(heuresSupCalc.extraPaye)}</span>}
+              </div>
+            )}
+          </div>
+
+          {/* Répartition par tâche */}
+          <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+            <h3 className="font-semibold px-4 pt-4 pb-2">Répartition par tâche</h3>
+            {parTache.length === 0 && (
+              <div className="px-4 pb-4 text-sm" style={{ color: "#8A8271" }}>
+                Aucune donnée sur cette période.
+              </div>
+            )}
+            {parTache.map(([tache, stats], i) => (
+              <div
+                key={tache}
+                className="flex items-center justify-between px-4 py-2.5 text-sm"
+                style={{ borderTop: i === 0 ? `1px solid ${PALETTE.line}` : `1px solid ${PALETTE.line}` }}
+              >
+                <span>
+                  {tache} <span style={{ color: "#8A8271" }}>({stats.jours} j)</span>
+                </span>
+                <strong>{fmtHours(stats.paye)}</strong>
+              </div>
+            ))}
+          </div>
+
+          {/* Absences */}
+          <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+            <div className="flex items-center justify-between px-4 pt-4 pb-2">
+              <h3 className="font-semibold">Absences</h3>
+              <span className="text-sm font-semibold" style={{ color: absences.length > 0 ? PALETTE.rust : "#8A8271" }}>
+                {absences.length}
+              </span>
+            </div>
+            {absences.length > 0 && (
+              <div className="px-4 pb-4 text-xs space-y-1">
+                {absences.map((a) => (
+                  <div key={a.date} className="flex justify-between" style={{ color: "#6B6552" }}>
+                    <span>{fmtDateLong(a.date)}</span>
+                    <span style={{ color: a.motif === "Non pointé" ? "#B5AA88" : PALETTE.rust }}>{a.motif}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Avances / acomptes / prêts */}
+          <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+            <div className="flex items-center justify-between px-4 pt-4 pb-2">
+              <h3 className="font-semibold">Avances, acomptes et prêts</h3>
+              <span className="text-sm font-semibold" style={{ color: PALETTE.rust }}>
+                Solde total dû : {fmtEuros(soldeTotal)}
+              </span>
+            </div>
+            {mouvementsPeriode.length === 0 ? (
+              <div className="px-4 pb-4 text-sm" style={{ color: "#8A8271" }}>
+                Aucune opération sur cette période.
+              </div>
+            ) : (
+              <div className="px-4 pb-4 text-xs space-y-1">
+                {mouvementsPeriode
+                  .slice()
+                  .sort((a, b) => a.date.localeCompare(b.date))
+                  .map((t) => (
+                    <div key={t.id} className="flex justify-between" style={{ color: "#6B6552" }}>
+                      <span>
+                        {t.date} · {TX_TYPES.find((x) => x.id === t.type)?.label}
+                      </span>
+                      <strong style={{ color: t.type === "remboursement" ? PALETTE.green : PALETTE.rust }}>
+                        {t.type === "remboursement" ? "-" : "+"}
+                        {fmtEuros(t.montant)}
+                      </strong>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+
+          {/* Estimation paie */}
+          <div style={{ background: PALETTE.bg, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4">
+            <h3 className="font-semibold mb-2">Estimation paie</h3>
+            {r === 0 ? (
+              <div className="text-sm" style={{ color: PALETTE.rust }}>
+                Taux horaire non renseigné — impossible d'estimer.
+              </div>
+            ) : (
+              <div className="space-y-1 text-sm">
+                <div className="flex justify-between">
+                  <span>Brut estimé</span>
+                  <strong>{fmtEuros(brut)}</strong>
+                </div>
+                <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                  <span>− Cotisations ({tauxCotisations}%)</span>
+                  <strong>{fmtEuros(cotisations)}</strong>
+                </div>
+                <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                  <span>− Avances/acomptes (période)</span>
+                  <strong>{fmtEuros(deductionsPeriode)}</strong>
+                </div>
+                <div className="flex justify-between pt-1 mt-1 font-semibold" style={{ borderTop: `1px solid ${PALETTE.line}`, color: PALETTE.green }}>
+                  <span>= Net estimé</span>
+                  <strong>{fmtEuros(net)}</strong>
+                </div>
+              </div>
+            )}
+            <p className="text-xs mt-3" style={{ color: "#8A8271" }}>
+              Estimation indicative — taux de cotisations réglable dans Paramètres, pas un bulletin de paie officiel.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function Recap({ employees, entries }) {
   const [start, setStart] = useState(() => {
