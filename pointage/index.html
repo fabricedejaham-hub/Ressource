@@ -74,6 +74,9 @@ const Calculator = mkIcon("🧮");
 const CalendarX = mkIcon("📅");
 const FileText = mkIcon("📄");
 const CalendarDays = mkIcon("🗓");
+const LayoutDashboard = mkIcon("🏠");
+const Lock = mkIcon("🔒");
+const AlertTriangle = mkIcon("⚠️");
 
 
 // ---------- Helpers ----------
@@ -152,6 +155,56 @@ const isWeekend = (iso) => {
   return day === 0 || day === 6;
 };
 
+// Calcule la date de Pâques (algorithme de Gauss) pour une année donnée
+const easterDate = (year) => {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+};
+
+const addDays = (date, n) => {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d;
+};
+
+const toISO = (date) => date.toISOString().slice(0, 10);
+
+// Liste des jours fériés légaux français pour une année donnée
+const joursFeries = (year) => {
+  const paques = easterDate(year);
+  return [
+    `${year}-01-01`, // Jour de l'an
+    toISO(addDays(paques, 1)), // Lundi de Pâques
+    `${year}-05-01`, // Fête du travail
+    `${year}-05-08`, // Victoire 1945
+    toISO(addDays(paques, 39)), // Ascension
+    toISO(addDays(paques, 50)), // Lundi de Pentecôte
+    `${year}-07-14`, // Fête nationale
+    `${year}-08-15`, // Assomption
+    `${year}-11-01`, // Toussaint
+    `${year}-11-11`, // Armistice
+    `${year}-12-25`, // Noël
+  ];
+};
+
+const isJourFerie = (iso) => {
+  const year = Number(iso.slice(0, 4));
+  return joursFeries(year).includes(iso);
+};
+
 // Calcule la répartition heures normales / majorées 1 / majorées 2 pour un total hebdo payé
 const splitOvertime = (totalHeures, hs) => {
   const s1 = Number(hs.seuilNormal);
@@ -174,6 +227,9 @@ function PointageApp() {
   const [heuresDefaut, setHeuresDefaut] = useState(7);
   const [heuresSup, setHeuresSup] = useState(DEFAULT_HS);
   const [tauxCotisations, setTauxCotisations] = useState(DEFAULT_TAUX_COTISATIONS);
+  const [pinCode, setPinCode] = useState("");
+  const [lastBackupDate, setLastBackupDate] = useState(null);
+  const [unlocked, setUnlocked] = useState(false);
   const [tab, setTab] = useState("pointage");
   const [selectedDate, setSelectedDate] = useState(todayISO());
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
@@ -208,6 +264,8 @@ function PointageApp() {
           setTaches(cfg.taches && cfg.taches.length > 0 ? cfg.taches : DEFAULT_TACHES);
           setHeuresDefaut(cfg.heuresDefaut ?? 7);
           setTauxCotisations(cfg.tauxCotisations ?? DEFAULT_TAUX_COTISATIONS);
+          setPinCode(cfg.pinCode || "");
+          setLastBackupDate(cfg.lastBackupDate || null);
         }
       } catch (e) {
         console.error("Erreur de chargement", e);
@@ -252,27 +310,37 @@ function PointageApp() {
 
   const updateTachesEcart = (next) => {
     setTachesEcart(next);
-    persist("config", { tachesEcart: next, heuresSup, taches, heuresDefaut, tauxCotisations });
+    persist("config", { tachesEcart: next, heuresSup, taches, heuresDefaut, tauxCotisations, pinCode, lastBackupDate });
   };
 
   const updateHeuresSup = (next) => {
     setHeuresSup(next);
-    persist("config", { tachesEcart, heuresSup: next, taches, heuresDefaut, tauxCotisations });
+    persist("config", { tachesEcart, heuresSup: next, taches, heuresDefaut, tauxCotisations, pinCode, lastBackupDate });
   };
 
   const updateTaches = (next) => {
     setTaches(next);
-    persist("config", { tachesEcart, heuresSup, taches: next, heuresDefaut, tauxCotisations });
+    persist("config", { tachesEcart, heuresSup, taches: next, heuresDefaut, tauxCotisations, pinCode, lastBackupDate });
   };
 
   const updateHeuresDefaut = (next) => {
     setHeuresDefaut(next);
-    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut: next, tauxCotisations });
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut: next, tauxCotisations, pinCode, lastBackupDate });
   };
 
   const updateTauxCotisations = (next) => {
     setTauxCotisations(next);
-    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut, tauxCotisations: next });
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut, tauxCotisations: next, pinCode, lastBackupDate });
+  };
+
+  const updatePinCode = (next) => {
+    setPinCode(next);
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut, tauxCotisations, pinCode: next, lastBackupDate });
+  };
+
+  const updateLastBackupDate = (next) => {
+    setLastBackupDate(next);
+    persist("config", { tachesEcart, heuresSup, taches, heuresDefaut, tauxCotisations, pinCode, lastBackupDate: next });
   };
 
   if (loading) {
@@ -281,6 +349,10 @@ function PointageApp() {
         <Loader2 className="animate-spin" size={28} color={PALETTE.green} />
       </div>
     );
+  }
+
+  if (pinCode && !unlocked) {
+    return <LockScreen pinCode={pinCode} onUnlock={() => setUnlocked(true)} />;
   }
 
   return (
@@ -298,6 +370,17 @@ function PointageApp() {
         <TabBar tab={tab} setTab={setTab} />
       </div>
       <main className="max-w-5xl mx-auto px-4 pb-24 pt-6">
+        {tab === "dashboard" && (
+          <Dashboard
+            employees={employees}
+            entries={entries}
+            transactions={transactions}
+            heuresSup={heuresSup}
+            tauxCotisations={tauxCotisations}
+            lastBackupDate={lastBackupDate}
+            setTab={setTab}
+          />
+        )}
         {tab === "pointage" && (
           <Pointage
             employees={employees}
@@ -348,6 +431,10 @@ function PointageApp() {
             updateEntries={updateEntries}
             transactions={transactions}
             updateTransactions={updateTransactions}
+            pinCode={pinCode}
+            updatePinCode={updatePinCode}
+            lastBackupDate={lastBackupDate}
+            updateLastBackupDate={updateLastBackupDate}
           />
         )}
       </main>
@@ -356,6 +443,59 @@ function PointageApp() {
 }
 
 // ---------- Header ----------
+// ---------- Écran de verrouillage (code PIN) ----------
+function LockScreen({ pinCode, onUnlock }) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState(false);
+
+  const submit = () => {
+    if (value === pinCode) {
+      onUnlock();
+    } else {
+      setError(true);
+      setValue("");
+    }
+  };
+
+  return (
+    <div style={{ background: PALETTE.greenDark }} className="min-h-screen flex items-center justify-center p-6">
+      <div style={{ background: PALETTE.card }} className="rounded-md p-6 w-full max-w-xs text-center">
+        <Lock size={28} color={PALETTE.green} className="mx-auto mb-3" />
+        <h1 className="font-bold text-lg mb-1">Carnet de pointage</h1>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Entrez le code pour accéder aux données.
+        </p>
+        <input
+          type="password"
+          inputMode="numeric"
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setError(false);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          autoFocus
+          className="w-full px-3 py-2 rounded border text-center text-lg tracking-widest mb-3"
+          style={{ borderColor: error ? PALETTE.rust : PALETTE.line }}
+        />
+        {error && (
+          <p className="text-xs mb-3" style={{ color: PALETTE.rust }}>
+            Code incorrect.
+          </p>
+        )}
+        <button
+          onClick={submit}
+          style={{ background: PALETTE.green }}
+          className="w-full py-2 rounded text-white text-sm font-medium"
+        >
+          Déverrouiller
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 function Header({ saveState }) {
   return (
     <div style={{ background: PALETTE.greenDark }} className="text-white">
@@ -378,6 +518,7 @@ function Header({ saveState }) {
 // ---------- Tabs ----------
 function TabBar({ tab, setTab }) {
   const items = [
+    { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard },
     { id: "pointage", label: "Pointage", icon: ClipboardList },
     { id: "salaries", label: "Salariés", icon: Users },
     { id: "equipes", label: "Équipes", icon: Users2 },
@@ -1270,11 +1411,16 @@ function Parametres({
   updateEntries,
   transactions,
   updateTransactions,
+  pinCode,
+  updatePinCode,
+  lastBackupDate,
+  updateLastBackupDate,
 }) {
   const [nouvelleTache, setNouvelleTache] = useState("");
   const [editingTache, setEditingTache] = useState(null); // ancien nom en cours d'édition
   const [editValue, setEditValue] = useState("");
   const [restoreMsg, setRestoreMsg] = useState("");
+  const [pinInput, setPinInput] = useState(pinCode || "");
 
   const exportBackup = () => {
     const backup = {
@@ -1284,7 +1430,7 @@ function Parametres({
       teams,
       entries,
       transactions,
-      config: { tachesEcart, heuresSup, taches, heuresDefaut },
+      config: { tachesEcart, heuresSup, taches, heuresDefaut, tauxCotisations },
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1293,6 +1439,7 @@ function Parametres({
     a.download = `pointage-sauvegarde-${todayISO()}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    updateLastBackupDate(new Date().toISOString());
   };
 
   const importBackup = (file) => {
@@ -1551,6 +1698,11 @@ function Parametres({
             >
               <Download size={16} /> Télécharger une sauvegarde complète
             </button>
+            <p className="text-xs mt-2" style={{ color: "#8A8271" }}>
+              {lastBackupDate
+                ? `Dernière sauvegarde : ${new Date(lastBackupDate).toLocaleDateString("fr-FR")} à ${new Date(lastBackupDate).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`
+                : "Aucune sauvegarde téléchargée pour l'instant."}
+            </p>
           </div>
           <div style={{ borderTop: `1px solid ${PALETTE.line}` }} className="pt-4">
             <label className="text-sm font-medium block mb-2">Restaurer une sauvegarde</label>
@@ -1573,6 +1725,49 @@ function Parametres({
               </p>
             )}
           </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="font-semibold mb-1">Code d'accès (PIN)</h2>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Protège l'ouverture de l'appli par un code — utile puisque le lien est public et contient des données
+          sensibles (avances, taux horaires). Ce n'est pas un chiffrement fort, juste une barrière d'accès simple.
+        </p>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="Ex : 1234"
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              className="px-3 py-2 rounded border text-sm w-32"
+              style={{ borderColor: PALETTE.line }}
+            />
+            <button
+              onClick={() => updatePinCode(pinInput.trim())}
+              style={{ background: PALETTE.green }}
+              className="px-4 py-2 rounded text-white text-sm font-medium"
+            >
+              {pinCode ? "Modifier le code" : "Activer le code"}
+            </button>
+            {pinCode && (
+              <button
+                onClick={() => {
+                  setPinInput("");
+                  updatePinCode("");
+                }}
+                className="px-4 py-2 rounded text-sm font-medium"
+                style={{ color: PALETTE.rust }}
+              >
+                Désactiver
+              </button>
+            )}
+          </div>
+          <p className="text-xs mt-2" style={{ color: "#8A8271" }}>
+            {pinCode ? "Code actif — il sera demandé à chaque ouverture de l'appli." : "Aucun code actif pour le moment."}
+          </p>
         </div>
       </div>
     </div>
@@ -1956,7 +2151,7 @@ function Absences({ employees, entries }) {
   const joursPointes = useMemo(() => {
     const set = new Set(filtered.map((e) => e.date));
     return Array.from(set)
-      .filter((d) => !isWeekend(d))
+      .filter((d) => !isWeekend(d) && !isJourFerie(d))
       .sort();
   }, [filtered]);
 
@@ -2106,8 +2301,8 @@ function CongesAbsences({ employees, updateEmployees, entries, updateEntries, ta
     const last = new Date(d2 + "T00:00:00");
     while (cur <= last) {
       const iso = cur.toISOString().slice(0, 10);
-      // Jours ouvrables : le samedi compte, seul le dimanche est exclu
-      if (cur.getDay() !== 0) dates.push(iso);
+      // Jours ouvrables : le samedi compte, dimanche et jours fériés sont exclus
+      if (cur.getDay() !== 0 && !isJourFerie(iso)) dates.push(iso);
       cur.setDate(cur.getDate() + 1);
     }
     return dates;
@@ -2241,7 +2436,8 @@ function CongesAbsences({ employees, updateEmployees, entries, updateEntries, ta
           </button>
         </div>
         <p className="text-xs mt-2" style={{ color: "#8A8271" }}>
-          Comptage en jours ouvrables : le samedi est inclus, seul le dimanche est exclu automatiquement. Un jour
+          Comptage en jours ouvrables : le samedi est inclus, le dimanche et les jours fériés légaux sont exclus
+          automatiquement. Un jour
           déjà pointé présent sera écrasé par cette
           déclaration.
         </p>
@@ -2357,7 +2553,7 @@ function SyntheseSalarie({ employees, entries, transactions, heuresSup, tauxCoti
   const joursPointes = useMemo(() => {
     const set = new Set(entries.filter((e) => e.date >= start && e.date <= end).map((e) => e.date));
     return Array.from(set)
-      .filter((d) => !isWeekend(d))
+      .filter((d) => !isWeekend(d) && !isJourFerie(d))
       .sort();
   }, [entries, start, end]);
 
@@ -2678,6 +2874,174 @@ function SyntheseSalarie({ employees, entries, transactions, heuresSup, tauxCoti
     </div>
   );
 }
+
+// ---------- Tableau de bord ----------
+function Dashboard({ employees, entries, transactions, heuresSup, tauxCotisations, lastBackupDate, setTab }) {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  const monthEnd = todayISO();
+
+  // Masse salariale nette estimée du mois (même logique que Simulation paie)
+  const bruts = useMemo(() => {
+    const byEmp = {};
+    entries
+      .filter((e) => e.present && e.date >= monthStart && e.date <= monthEnd)
+      .forEach((e) => {
+        const wk = weekStart(e.date);
+        if (!byEmp[e.employeeId]) byEmp[e.employeeId] = {};
+        if (!byEmp[e.employeeId][wk]) byEmp[e.employeeId][wk] = { eff: 0, paye: 0 };
+        byEmp[e.employeeId][wk].eff += Number(e.heuresEffectives || 0);
+        byEmp[e.employeeId][wk].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+      });
+    const result = {};
+    for (const [empId, weeks] of Object.entries(byEmp)) {
+      let normales = 0,
+        majo1 = 0,
+        majo2 = 0,
+        extraPaye = 0;
+      Object.values(weeks).forEach(({ eff, paye }) => {
+        const s = splitOvertime(eff, heuresSup);
+        normales += s.normales;
+        majo1 += s.majo1;
+        majo2 += s.majo2;
+        extraPaye += Math.max(0, paye - eff);
+      });
+      result[empId] = { normales, majo1, majo2, extraPaye };
+    }
+    return result;
+  }, [entries, monthStart, monthEnd, heuresSup]);
+
+  let masseSalariale = 0;
+  let heuresSupTotal = 0;
+  employees.forEach((emp) => {
+    const b = bruts[emp.id];
+    if (!b) return;
+    const r = Number(emp.tauxHoraire) || 0;
+    const brut = r
+      ? b.normales * r + b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) + b.extraPaye * r
+      : 0;
+    const net = brut - brut * (Number(tauxCotisations) / 100);
+    masseSalariale += net;
+    heuresSupTotal += b.majo1 + b.majo2;
+  });
+
+  const avancesMois = transactions
+    .filter((t) => (t.type === "avance" || t.type === "acompte") && t.date >= monthStart && t.date <= monthEnd)
+    .reduce((s, t) => s + t.montant, 0);
+
+  // Absences du mois (jours ouvrés pointés hors week-end/fériés où le salarié n'était pas présent)
+  const joursPointesMois = useMemo(() => {
+    const set = new Set(entries.filter((e) => e.date >= monthStart && e.date <= monthEnd).map((e) => e.date));
+    return Array.from(set).filter((d) => !isWeekend(d) && !isJourFerie(d));
+  }, [entries, monthStart, monthEnd]);
+
+  let absencesMois = 0;
+  employees.forEach((emp) => {
+    joursPointesMois.forEach((date) => {
+      const entry = entries.find((e) => e.date === date && e.employeeId === emp.id);
+      if (!(entry && entry.present)) absencesMois += 1;
+    });
+  });
+
+  // Alertes
+  const alerts = [];
+  const sansTaux = employees.filter((e) => !Number(e.tauxHoraire));
+  if (sansTaux.length > 0) {
+    alerts.push({
+      text: `${sansTaux.length} salarié(s) sans taux horaire renseigné : ${sansTaux.map((e) => e.nom).join(", ")}`,
+      tab: "salaries",
+    });
+  }
+  employees.forEach((emp) => {
+    const pris = entries.filter((e) => e.employeeId === emp.id && !e.present && e.motif === "Congé payé").length;
+    const acquis = Number(emp.joursCPAcquis) || 0;
+    if (acquis - pris < 0) {
+      alerts.push({ text: `Solde de congés payés négatif pour ${emp.nom} (${acquis - pris} j)`, tab: "conges" });
+    }
+  });
+  employees.forEach((emp) => {
+    const b = bruts[emp.id];
+    if (b && b.majo1 + b.majo2 > 10) {
+      alerts.push({ text: `${emp.nom} a ${fmtHours(b.majo1 + b.majo2)} d'heures majorées ce mois-ci`, tab: "heuresSup" });
+    }
+  });
+  const joursDepuisSauvegarde = lastBackupDate
+    ? Math.floor((Date.now() - new Date(lastBackupDate).getTime()) / 86400000)
+    : null;
+  if (joursDepuisSauvegarde === null || joursDepuisSauvegarde > 7) {
+    alerts.push({
+      text: joursDepuisSauvegarde === null ? "Aucune sauvegarde téléchargée pour l'instant" : `Dernière sauvegarde il y a ${joursDepuisSauvegarde} jours`,
+      tab: "parametres",
+    });
+  }
+
+  const monthLabel = now.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+
+  return (
+    <div>
+      <h2 className="font-semibold mb-3 capitalize">{monthLabel}</h2>
+
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+          <div className="text-xs" style={{ color: "#8A8271" }}>
+            Masse salariale nette estimée
+          </div>
+          <div className="text-lg font-bold" style={{ color: PALETTE.green }}>
+            {fmtEuros(masseSalariale)}
+          </div>
+        </div>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+          <div className="text-xs" style={{ color: "#8A8271" }}>
+            Avances/acomptes versés
+          </div>
+          <div className="text-lg font-bold" style={{ color: PALETTE.rust }}>
+            {fmtEuros(avancesMois)}
+          </div>
+        </div>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+          <div className="text-xs" style={{ color: "#8A8271" }}>
+            Heures majorées
+          </div>
+          <div className="text-lg font-bold" style={{ color: PALETTE.ink }}>
+            {fmtHours(heuresSupTotal)}
+          </div>
+        </div>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+          <div className="text-xs" style={{ color: "#8A8271" }}>
+            Absences (jours ouvrés)
+          </div>
+          <div className="text-lg font-bold" style={{ color: PALETTE.ink }}>
+            {absencesMois}
+          </div>
+        </div>
+      </div>
+
+      {alerts.length > 0 && (
+        <div>
+          <h3 className="font-semibold mb-2">Alertes</h3>
+          <div className="space-y-2 mb-6">
+            {alerts.map((a, i) => (
+              <button
+                key={i}
+                onClick={() => setTab(a.tab)}
+                className="w-full text-left flex items-start gap-2 p-3 rounded-md text-sm"
+                style={{ background: "#FBF0E9", border: `1px solid ${PALETTE.rust}` }}
+              >
+                <AlertTriangle size={16} color={PALETTE.rust} className="shrink-0 mt-0.5" />
+                <span style={{ color: "#5A3320" }}>{a.text}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {employees.length === 0 && (
+        <EmptyState text="Ajoutez vos salariés dans l'onglet « Salariés » pour commencer." />
+      )}
+    </div>
+  );
+}
+
 
 function Recap({ employees, entries }) {
   const [start, setStart] = useState(() => {
