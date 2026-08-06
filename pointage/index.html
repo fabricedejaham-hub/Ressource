@@ -2603,7 +2603,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
     const cotisations = brut * (Number(tauxCotisations) / 100);
     const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0, loyer: 0 };
     const loyerAuto = loyerPourPeriode(emp, start, end);
-    const deductions = m.avance + m.acompte + m.remboursement + m.loyer + loyerAuto;
+    const deductions = m.avance + m.acompte + m.remboursement + loyerAuto;
     const primesMontant = primesParEmp[emp.id] || 0;
     const net = brut - cotisations - deductions + primesMontant;
     return { emp, b, brut, cotisations, m, deductions, loyerAuto, primesMontant, net };
