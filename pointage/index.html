@@ -217,6 +217,22 @@ const isJourFerie = (iso) => {
   return joursFeries(year).includes(iso);
 };
 
+// Calcule le loyer dû automatiquement pour une période, tant que le salarié a un loyer réglé,
+// à partir de sa date de début, et jusqu'à la fin de son contrat (CDD/Saisonnier) le cas échéant.
+// S'arrête tout seul : fin de contrat dépassée, champ vidé, ou salarié supprimé.
+const loyerPourPeriode = (emp, start, end) => {
+  const montant = Number(emp.loyerMensuel);
+  if (!(montant > 0) || !emp.loyerDebut) return 0;
+  const finContrat = (emp.typeContrat === "CDD" || emp.typeContrat === "Saisonnier") && emp.dateFinContrat ? emp.dateFinContrat : null;
+  const activeStart = emp.loyerDebut > start ? emp.loyerDebut : start;
+  const activeEnd = finContrat && finContrat < end ? finContrat : end;
+  if (activeStart > activeEnd) return 0;
+  const d1 = new Date(activeStart.slice(0, 7) + "-01T00:00:00");
+  const d2 = new Date(activeEnd.slice(0, 7) + "-01T00:00:00");
+  const mois = (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth()) + 1;
+  return Math.max(0, mois) * montant;
+};
+
 // Calcule la répartition heures normales / majorées 1 / majorées 2 pour un total hebdo payé
 const splitOvertime = (totalHeures, hs) => {
   const s1 = Number(hs.seuilNormal);
@@ -1149,6 +1165,45 @@ function Salaries({ employees, updateEmployees }) {
                     )}
                   </>
                 )}
+                <span className="text-xs" style={{ color: "#8A8271" }}>
+                  Loyer prélevé :
+                </span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="€/mois"
+                  value={emp.loyerMensuel ?? ""}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    updateEmployees(
+                      employees.map((x) =>
+                        x.id === emp.id
+                          ? { ...x, loyerMensuel: val, loyerDebut: val && !x.loyerDebut ? todayISO() : x.loyerDebut }
+                          : x
+                      )
+                    );
+                  }}
+                  className="px-2 py-1.5 rounded border text-xs w-24"
+                  style={{ borderColor: PALETTE.line }}
+                />
+                {Number(emp.loyerMensuel) > 0 && (
+                  <>
+                    <span className="text-xs" style={{ color: "#8A8271" }}>
+                      depuis le
+                    </span>
+                    <input
+                      type="date"
+                      value={emp.loyerDebut || todayISO()}
+                      onChange={(e) => updateField(emp.id, "loyerDebut", e.target.value)}
+                      className="px-2 py-1.5 rounded border text-xs"
+                      style={{ borderColor: PALETTE.line }}
+                    />
+                    <span className="text-xs" style={{ color: PALETTE.green }} title="Déduit automatiquement chaque mois du net, jusqu'à la fin du contrat ou tant que ce champ n'est pas vidé">
+                      ⚙ auto
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           ))}
@@ -1295,6 +1350,7 @@ function Avances({ employees, transactions, updateTransactions }) {
   const [employeeId, setEmployeeId] = useState(employees[0]?.id || "");
   const [type, setType] = useState("avance");
   const [montant, setMontant] = useState("");
+  const [mensualite, setMensualite] = useState("");
   const [date, setDate] = useState(todayISO());
   const [note, setNote] = useState("");
   const [filterEmp, setFilterEmp] = useState("all");
@@ -1307,9 +1363,18 @@ function Avances({ employees, transactions, updateTransactions }) {
     if (!employeeId || !montant || Number(montant) <= 0) return;
     updateTransactions([
       ...transactions,
-      { id: uid(), employeeId, type, montant: Number(montant), date, note: note.trim() },
+      {
+        id: uid(),
+        employeeId,
+        type,
+        montant: Number(montant),
+        date,
+        note: note.trim(),
+        ...(type === "pret" && mensualite ? { mensualite: Number(mensualite) } : {}),
+      },
     ]);
     setMontant("");
+    setMensualite("");
     setNote("");
   };
 
@@ -1321,6 +1386,7 @@ function Avances({ employees, transactions, updateTransactions }) {
   const balances = useMemo(() => {
     const map = {};
     for (const t of transactions) {
+      if (t.type === "loyer") continue; // le loyer n'est pas une dette à rembourser
       if (!map[t.employeeId]) map[t.employeeId] = 0;
       map[t.employeeId] += t.type === "remboursement" ? -t.montant : t.montant;
     }
@@ -1328,6 +1394,65 @@ function Avances({ employees, transactions, updateTransactions }) {
   }, [transactions]);
 
   const totalDu = Object.values(balances).reduce((s, v) => s + v, 0);
+
+  // Prêts avec mensualité, non totalement remboursés (remboursements comptés depuis la date du prêt)
+  // Ajoute N mois à une date ISO
+  const addMonths = (iso, n) => {
+    const d = new Date(iso + "T00:00:00");
+    d.setMonth(d.getMonth() + n);
+    return d.toISOString().slice(0, 10);
+  };
+
+  // Échéancier complet par prêt : une échéance par mois jusqu'à épuration de la dette
+  const pretsEnCours = useMemo(() => {
+    return transactions
+      .filter((t) => t.type === "pret" && t.mensualite)
+      .map((pret) => {
+        const rembourse = transactions
+          .filter((t) => t.type === "remboursement" && t.employeeId === pret.employeeId && t.date >= pret.date)
+          .reduce((s, t) => s + t.montant, 0);
+        const restant = Math.max(0, pret.montant - rembourse);
+
+        // Construit l'échéancier théorique : une échéance par mois, montant = mensualité (dernière = solde)
+        const nbEcheances = Math.ceil(pret.montant / pret.mensualite);
+        let cumulPaye = rembourse;
+        const echeances = [];
+        for (let n = 1; n <= nbEcheances; n++) {
+          const dueDate = addMonths(pret.date, n);
+          const montantEcheance = n < nbEcheances ? pret.mensualite : pret.montant - pret.mensualite * (nbEcheances - 1);
+          let statut;
+          if (cumulPaye >= montantEcheance - 0.01) {
+            statut = "payee";
+            cumulPaye -= montantEcheance;
+          } else if (dueDate <= todayISO()) {
+            statut = "retard";
+          } else {
+            statut = "avenir";
+          }
+          echeances.push({ n, dueDate, montant: montantEcheance, statut });
+        }
+
+        const enRetard = echeances.filter((e) => e.statut === "retard");
+        const emp = employees.find((e) => e.id === pret.employeeId);
+        return { pret, emp, rembourse, restant, echeances, enRetard };
+      })
+      .filter((p) => p.restant > 0 && p.emp);
+  }, [transactions, employees]);
+
+  const regulariser = (p) => {
+    const additions = p.enRetard.map((e) => ({
+      id: uid(),
+      employeeId: p.pret.employeeId,
+      type: "remboursement",
+      montant: e.montant,
+      date: e.dueDate,
+      note: `Mensualité prêt — échéance du ${e.dueDate}`,
+    }));
+    updateTransactions([...transactions, ...additions]);
+  };
+
+  // Salariés avec un loyer automatique actif (informatif — géré dans l'onglet Salariés)
+  const loyersActifs = employees.filter((emp) => Number(emp.loyerMensuel) > 0 && emp.loyerDebut);
 
   const filtered = transactions
     .filter((t) => filterEmp === "all" || t.employeeId === filterEmp)
@@ -1393,6 +1518,18 @@ function Avances({ employees, transactions, updateTransactions }) {
             className="px-3 py-2 rounded border text-sm w-32"
             style={{ borderColor: PALETTE.line }}
           />
+          {type === "pret" && (
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              placeholder="Mensualité (€, optionnel)"
+              value={mensualite}
+              onChange={(e) => setMensualite(e.target.value)}
+              className="px-3 py-2 rounded border text-sm w-40"
+              style={{ borderColor: PALETTE.line }}
+            />
+          )}
           <input
             type="date"
             value={date}
@@ -1417,10 +1554,99 @@ function Avances({ employees, transactions, updateTransactions }) {
           </button>
         </div>
         <p className="text-xs mt-2" style={{ color: "#8A8271" }}>
-          Astuce : utilisez « Remboursement » quand un prêt est remboursé (en espèces ou déduit de la paie) — ça
-          réduit le solde dû du salarié.
+          Pour un prêt, indiquez une mensualité pour suivre le remboursement mois par mois ci-dessous. Les
+          remboursements sont déduits du net dans Simulation paie et Synthèse salarié.
         </p>
       </div>
+
+      {loyersActifs.length > 0 && (
+        <>
+          <h3 className="font-semibold mb-2">Loyers automatiques actifs</h3>
+          <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden mb-6">
+            {loyersActifs.map((emp, i) => (
+              <div
+                key={emp.id}
+                className="flex items-center justify-between px-4 py-3 text-sm flex-wrap gap-2"
+                style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+              >
+                <span className="font-medium">{emp.nom}</span>
+                <span style={{ color: "#8A8271" }} className="text-xs">
+                  {fmtEuros(emp.loyerMensuel)}/mois depuis le {emp.loyerDebut}
+                  {emp.dateFinContrat ? ` · jusqu'au ${emp.dateFinContrat}` : ""} — déduit automatiquement, rien à
+                  faire ici
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs mb-6" style={{ color: "#8A8271" }}>
+            Réglable dans l'onglet Salariés. Pour arrêter un loyer, videz le champ « Loyer prélevé » du salarié
+            concerné, ou définissez sa date de fin de contrat.
+          </p>
+        </>
+      )}
+
+      {pretsEnCours.length > 0 && (
+        <>
+          <h3 className="font-semibold mb-2">Prêts en cours</h3>
+          <div className="space-y-2 mb-6">
+            {pretsEnCours.map((p) => (
+              <div
+                key={p.pret.id}
+                style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }}
+                className="rounded-md overflow-hidden"
+              >
+                <div className="flex items-center justify-between px-4 py-3 flex-wrap gap-2" style={{ background: PALETTE.bg }}>
+                  <div>
+                    <div className="font-medium">{p.emp.nom}</div>
+                    <div className="text-xs" style={{ color: "#8A8271" }}>
+                      Prêté : {fmtEuros(p.pret.montant)} · Mensualité : {fmtEuros(p.pret.mensualite)} · Remboursé :{" "}
+                      {fmtEuros(p.rembourse)} · Restant : <strong style={{ color: PALETTE.rust }}>{fmtEuros(p.restant)}</strong>
+                    </div>
+                  </div>
+                  {p.enRetard.length > 0 && (
+                    <button
+                      onClick={() => regulariser(p)}
+                      style={{ background: PALETTE.green }}
+                      className="px-3 py-1.5 rounded text-white text-xs font-medium"
+                    >
+                      Régulariser {p.enRetard.length} échéance{p.enRetard.length > 1 ? "s" : ""} en retard (
+                      {fmtEuros(p.enRetard.reduce((s, e) => s + e.montant, 0))})
+                    </button>
+                  )}
+                </div>
+                <div className="px-4 py-2 text-xs space-y-1">
+                  {p.echeances.map((e) => (
+                    <div key={e.n} className="flex items-center justify-between">
+                      <span style={{ color: "#8A8271" }}>
+                        Échéance {e.n} — {e.dueDate}
+                      </span>
+                      <span className="flex items-center gap-2">
+                        <span>{fmtEuros(e.montant)}</span>
+                        {e.statut === "payee" && (
+                          <span style={{ color: PALETTE.green }} className="font-medium">
+                            ✓ Payée
+                          </span>
+                        )}
+                        {e.statut === "retard" && (
+                          <span style={{ color: PALETTE.rust }} className="font-medium">
+                            En retard
+                          </span>
+                        )}
+                        {e.statut === "avenir" && <span style={{ color: "#B5AA88" }}>À échoir</span>}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs mb-6" style={{ color: "#8A8271" }}>
+            L'échéancier se met à jour automatiquement chaque mois — appuyez sur « Régulariser » pour enregistrer
+            en une fois toutes les mensualités échues depuis votre dernière visite, jusqu'à ce que le prêt soit
+            entièrement soldé.
+          </p>
+        </>
+      )}
 
       <h3 className="font-semibold mb-2">Soldes par salarié</h3>
       <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden mb-6">
@@ -2346,7 +2572,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
     transactions
       .filter((t) => t.date >= start && t.date <= end)
       .forEach((t) => {
-        if (!byEmp[t.employeeId]) byEmp[t.employeeId] = { avance: 0, acompte: 0, pret: 0, remboursement: 0 };
+        if (!byEmp[t.employeeId]) byEmp[t.employeeId] = { avance: 0, acompte: 0, pret: 0, remboursement: 0, loyer: 0 };
         byEmp[t.employeeId][t.type] += t.montant;
       });
     return byEmp;
@@ -2375,11 +2601,12 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
         b.extraPaye * r
       : 0;
     const cotisations = brut * (Number(tauxCotisations) / 100);
-    const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0 };
-    const deductions = m.avance + m.acompte;
+    const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0, loyer: 0 };
+    const loyerAuto = loyerPourPeriode(emp, start, end);
+    const deductions = m.avance + m.acompte + m.remboursement + m.loyer + loyerAuto;
     const primesMontant = primesParEmp[emp.id] || 0;
     const net = brut - cotisations - deductions + primesMontant;
-    return { emp, b, brut, cotisations, m, deductions, primesMontant, net };
+    return { emp, b, brut, cotisations, m, deductions, loyerAuto, primesMontant, net };
   });
 
   const totalBrut = lignes.reduce((s, l) => s + l.brut, 0);
@@ -2397,7 +2624,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
         "Heures majo 2",
         "Brut estimé (€)",
         "Cotisations salariales (€)",
-        "Avances/acomptes période (€)",
+        "Avances/acomptes/remboursements période (€)",
         "Net estimé (€)",
       ],
     ];
@@ -2485,7 +2712,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
       </p>
 
       <div className="space-y-2">
-        {lignes.map(({ emp, b, brut, cotisations, m, deductions, primesMontant, net }) => {
+        {lignes.map(({ emp, b, brut, cotisations, m, deductions, loyerAuto, primesMontant, net }) => {
           const hasRate = Number(emp.tauxHoraire) > 0;
           return (
             <div
@@ -2493,7 +2720,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
               style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }}
               className="rounded-md p-3"
             >
-              <div className="flex items-center justify-between flex-wrap gap-2 mb-1.5">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
                 <span className="font-medium">{emp.nom}</span>
                 <span className="font-semibold" style={{ color: PALETTE.green }}>
                   Net estimé : {fmtEuros(net)}
@@ -2505,19 +2732,60 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
                   {primesMontant > 0 && ` Primes de la période : ${fmtEuros(primesMontant)}.`}
                 </div>
               ) : (
-                <div className="text-xs flex flex-wrap gap-x-4 gap-y-1" style={{ color: "#8A8271" }}>
-                  <span>
+                <div className="text-xs space-y-1" style={{ color: "#6B6552" }}>
+                  <div style={{ color: "#8A8271" }}>
                     Heures : {fmtHours(b.normales)} normales
                     {b.majo1 > 0 ? ` · +${heuresSup.tauxMajo1}% ${fmtHours(b.majo1)}` : ""}
                     {b.majo2 > 0 ? ` · +${heuresSup.tauxMajo2}% ${fmtHours(b.majo2)}` : ""}
                     {b.extraPaye > 0 ? ` · +${fmtHours(b.extraPaye)} payées hors travail effectif` : ""}
-                  </span>
-                  <span>Brut estimé : {fmtEuros(brut)}</span>
-                  <span style={{ color: PALETTE.rust }}>− Cotisations ({tauxCotisations}%) : {fmtEuros(cotisations)}</span>
-                  {deductions > 0 && <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(deductions)}</span>}
-                  {primesMontant > 0 && <span style={{ color: PALETTE.green }}>+ Primes : {fmtEuros(primesMontant)}</span>}
-                  {m.pret > 0 && <span>Prêt(s) versé(s) : {fmtEuros(m.pret)} (non déduit du net, voir Avances)</span>}
-                  {m.remboursement > 0 && <span>Remboursement reçu : {fmtEuros(m.remboursement)}</span>}
+                  </div>
+                  <div className="flex justify-between pt-1" style={{ borderTop: `1px solid ${PALETTE.line}` }}>
+                    <span>Brut estimé</span>
+                    <strong>{fmtEuros(brut)}</strong>
+                  </div>
+                  <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                    <span>− Cotisations ({tauxCotisations}%)</span>
+                    <strong>{fmtEuros(cotisations)}</strong>
+                  </div>
+                  {m.avance > 0 && (
+                    <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                      <span>− Avances</span>
+                      <strong>{fmtEuros(m.avance)}</strong>
+                    </div>
+                  )}
+                  {m.acompte > 0 && (
+                    <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                      <span>− Acomptes</span>
+                      <strong>{fmtEuros(m.acompte)}</strong>
+                    </div>
+                  )}
+                  {m.remboursement > 0 && (
+                    <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                      <span>− Remboursement(s) prêt</span>
+                      <strong>{fmtEuros(m.remboursement)}</strong>
+                    </div>
+                  )}
+                  {loyerAuto > 0 && (
+                    <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                      <span>− Loyer (auto)</span>
+                      <strong>{fmtEuros(loyerAuto)}</strong>
+                    </div>
+                  )}
+                  {primesMontant > 0 && (
+                    <div className="flex justify-between" style={{ color: PALETTE.green }}>
+                      <span>+ Primes</span>
+                      <strong>{fmtEuros(primesMontant)}</strong>
+                    </div>
+                  )}
+                  <div className="flex justify-between pt-1 mt-1 font-semibold" style={{ borderTop: `1px solid ${PALETTE.line}`, color: PALETTE.green }}>
+                    <span>= Net estimé</span>
+                    <strong>{fmtEuros(net)}</strong>
+                  </div>
+                  {m.pret > 0 && (
+                    <div className="pt-1" style={{ color: "#8A8271" }}>
+                      Prêt(s) versé(s) ce mois : {fmtEuros(m.pret)} (capital prêté, ne réduit pas le net — voir Avances)
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -2531,7 +2799,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
       >
         <span>Total brut estimé : {fmtEuros(totalBrut)}</span>
         <span style={{ color: PALETTE.rust }}>− Cotisations : {fmtEuros(totalCotisations)}</span>
-        <span style={{ color: PALETTE.rust }}>− Avances/acomptes : {fmtEuros(totalDeductions)}</span>
+        <span style={{ color: PALETTE.rust }}>− Avances/acomptes/remboursements : {fmtEuros(totalDeductions)}</span>
         <span style={{ color: PALETTE.green }}>+ Primes : {fmtEuros(totalPrimes)}</span>
         <span style={{ color: PALETTE.green }}>= Net estimé : {fmtEuros(totalNet)}</span>
       </div>
@@ -2993,7 +3261,7 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
 
   const mouvementsPeriode = transactions.filter((t) => t.employeeId === employeeId && t.date >= start && t.date <= end);
   const soldeTotal = transactions
-    .filter((t) => t.employeeId === employeeId)
+    .filter((t) => t.employeeId === employeeId && t.type !== "loyer")
     .reduce((s, t) => s + (t.type === "remboursement" ? -t.montant : t.montant), 0);
 
   const r = Number(emp?.tauxHoraire) || 0;
@@ -3004,19 +3272,59 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
       heuresSupCalc.extraPaye * r
     : 0;
   const cotisations = brut * (Number(tauxCotisations) / 100);
-  const deductionsPeriode = mouvementsPeriode
-    .filter((t) => t.type === "avance" || t.type === "acompte")
-    .reduce((s, t) => s + t.montant, 0);
+  const avancesPeriode = mouvementsPeriode.filter((t) => t.type === "avance").reduce((s, t) => s + t.montant, 0);
+  const acomptesPeriode = mouvementsPeriode.filter((t) => t.type === "acompte").reduce((s, t) => s + t.montant, 0);
+  const remboursementsPeriode = mouvementsPeriode.filter((t) => t.type === "remboursement").reduce((s, t) => s + t.montant, 0);
+  const loyerPeriode = loyerPourPeriode(emp, start, end);
+  const deductionsPeriode = avancesPeriode + acomptesPeriode + remboursementsPeriode + loyerPeriode;
   const primesPeriode = primes.filter((p) => p.employeeId === employeeId && p.date >= start && p.date <= end);
   const primesMontant = primesPeriode.reduce((s, p) => s + p.montant, 0);
   const net = brut - cotisations - deductionsPeriode + primesMontant;
 
-  return { presences, totalEff, totalPaye, heuresSupCalc, parTache, absences, mouvementsPeriode, soldeTotal, r, brut, cotisations, deductionsPeriode, primesPeriode, primesMontant, net };
+  return {
+    presences,
+    totalEff,
+    totalPaye,
+    heuresSupCalc,
+    parTache,
+    absences,
+    mouvementsPeriode,
+    soldeTotal,
+    r,
+    brut,
+    cotisations,
+    avancesPeriode,
+    acomptesPeriode,
+    remboursementsPeriode,
+    loyerPeriode,
+    deductionsPeriode,
+    primesPeriode,
+    primesMontant,
+    net,
+  };
 }
 
 // ---------- Contenu d'une fiche salarié (réutilisé à l'écran et à l'impression groupée) ----------
 function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations, pageBreak }) {
-  const { presences, totalEff, totalPaye, heuresSupCalc, parTache, absences, mouvementsPeriode, soldeTotal, r, brut, cotisations, deductionsPeriode, primesMontant, net } = data;
+  const {
+    presences,
+    totalEff,
+    totalPaye,
+    heuresSupCalc,
+    parTache,
+    absences,
+    mouvementsPeriode,
+    soldeTotal,
+    r,
+    brut,
+    cotisations,
+    avancesPeriode,
+    acomptesPeriode,
+    remboursementsPeriode,
+    loyerPeriode,
+    primesMontant,
+    net,
+  } = data;
   return (
     <div className="space-y-5" style={pageBreak ? { pageBreakBefore: "always" } : undefined}>
       {/* En-tête fiche */}
@@ -3171,10 +3479,30 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
               <span>− Cotisations ({tauxCotisations}%)</span>
               <strong>{fmtEuros(cotisations)}</strong>
             </div>
-            <div className="flex justify-between" style={{ color: PALETTE.rust }}>
-              <span>− Avances/acomptes (période)</span>
-              <strong>{fmtEuros(deductionsPeriode)}</strong>
-            </div>
+            {avancesPeriode > 0 && (
+              <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                <span>− Avances (période)</span>
+                <strong>{fmtEuros(avancesPeriode)}</strong>
+              </div>
+            )}
+            {acomptesPeriode > 0 && (
+              <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                <span>− Acomptes (période)</span>
+                <strong>{fmtEuros(acomptesPeriode)}</strong>
+              </div>
+            )}
+            {remboursementsPeriode > 0 && (
+              <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                <span>− Remboursement(s) prêt (période)</span>
+                <strong>{fmtEuros(remboursementsPeriode)}</strong>
+              </div>
+            )}
+            {loyerPeriode > 0 && (
+              <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                <span>− Loyer (auto, période)</span>
+                <strong>{fmtEuros(loyerPeriode)}</strong>
+              </div>
+            )}
             {primesMontant > 0 && (
               <div className="flex justify-between" style={{ color: PALETTE.green }}>
                 <span>+ Primes (période)</span>
@@ -3444,7 +3772,8 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
     const primesMois = primes
       .filter((p) => p.employeeId === emp.id && p.date >= monthStart && p.date <= monthEnd)
       .reduce((s, p) => s + p.montant, 0);
-    masseSalariale += net + primesMois;
+    const loyerMois = loyerPourPeriode(emp, monthStart, monthEnd);
+    masseSalariale += net + primesMois - loyerMois;
     heuresSupTotal += b.majo1 + b.majo2;
   });
 
@@ -3495,6 +3824,33 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
       alerts.push({ text: `Contrat de ${emp.nom} (${emp.typeContrat}) se termine dans ${jours} jour(s)`, tab: "salaries" });
     }
   });
+  transactions
+    .filter((t) => t.type === "pret" && t.mensualite)
+    .forEach((pret) => {
+      const emp = employees.find((e) => e.id === pret.employeeId);
+      if (!emp) return;
+      const rembourse = transactions
+        .filter((t) => t.type === "remboursement" && t.employeeId === pret.employeeId && t.date >= pret.date)
+        .reduce((s, t) => s + t.montant, 0);
+      if (rembourse >= pret.montant - 0.01) return;
+      const nbEcheances = Math.ceil(pret.montant / pret.mensualite);
+      let cumul = rembourse;
+      let enRetard = 0;
+      for (let n = 1; n <= nbEcheances; n++) {
+        const d = new Date(pret.date + "T00:00:00");
+        d.setMonth(d.getMonth() + n);
+        const dueDate = d.toISOString().slice(0, 10);
+        const montantEch = n < nbEcheances ? pret.mensualite : pret.montant - pret.mensualite * (nbEcheances - 1);
+        if (cumul >= montantEch - 0.01) {
+          cumul -= montantEch;
+        } else if (dueDate <= todayISO()) {
+          enRetard += 1;
+        }
+      }
+      if (enRetard > 0) {
+        alerts.push({ text: `Prêt de ${emp.nom} : ${enRetard} échéance(s) en retard à régulariser`, tab: "avances" });
+      }
+    });
   const joursDepuisSauvegarde = lastBackupDate
     ? Math.floor((Date.now() - new Date(lastBackupDate).getTime()) / 86400000)
     : null;
