@@ -219,18 +219,27 @@ const isJourFerie = (iso) => {
 
 // Calcule le loyer dû automatiquement pour une période, tant que le salarié a un loyer réglé,
 // à partir de sa date de début, et jusqu'à la fin de son contrat (CDD/Saisonnier) le cas échéant.
+// Compte les échéances mensuelles réelles (une par mois à partir de la date de début), peu importe
+// si la période chevauche deux mois civils — pas un simple compte de mois calendaires touchés.
 // S'arrête tout seul : fin de contrat dépassée, champ vidé, ou salarié supprimé.
 const loyerPourPeriode = (emp, start, end) => {
   const montant = Number(emp.loyerMensuel);
   if (!(montant > 0) || !emp.loyerDebut) return 0;
   const finContrat = (emp.typeContrat === "CDD" || emp.typeContrat === "Saisonnier") && emp.dateFinContrat ? emp.dateFinContrat : null;
-  const activeStart = emp.loyerDebut > start ? emp.loyerDebut : start;
-  const activeEnd = finContrat && finContrat < end ? finContrat : end;
-  if (activeStart > activeEnd) return 0;
-  const d1 = new Date(activeStart.slice(0, 7) + "-01T00:00:00");
-  const d2 = new Date(activeEnd.slice(0, 7) + "-01T00:00:00");
-  const mois = (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth()) + 1;
-  return Math.max(0, mois) * montant;
+  const effectiveEnd = finContrat && finContrat < end ? finContrat : end;
+  if (emp.loyerDebut > effectiveEnd) return 0;
+
+  const startDate = new Date(start + "T00:00:00");
+  const endDate = new Date(effectiveEnd + "T00:00:00");
+  let d = new Date(emp.loyerDebut + "T00:00:00");
+  let count = 0;
+  let garde = 0;
+  while (d <= endDate && garde < 1200) {
+    if (d >= startDate) count++;
+    d.setMonth(d.getMonth() + 1);
+    garde++;
+  }
+  return count * montant;
 };
 
 // Calcule la répartition heures normales / majorées 1 / majorées 2 pour un total hebdo payé
