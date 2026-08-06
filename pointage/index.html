@@ -217,6 +217,18 @@ const isJourFerie = (iso) => {
   return joursFeries(year).includes(iso);
 };
 
+// Ajoute n mois à une date YYYY-MM-DD sans dérive (recalculé depuis la date d'origine à chaque fois,
+// et le jour est ramené au dernier jour du mois si celui-ci n'existe pas, ex: 31 janvier + 1 mois = 28/29 février)
+const addMonthsClamped = (dateStr, n) => {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const total = (m - 1) + n;
+  const newY = y + Math.floor(total / 12);
+  const newM = ((total % 12) + 12) % 12;
+  const daysInMonth = new Date(newY, newM + 1, 0).getDate();
+  const newD = Math.min(d, daysInMonth);
+  return `${newY}-${String(newM + 1).padStart(2, "0")}-${String(newD).padStart(2, "0")}`;
+};
+
 // Calcule le loyer dû automatiquement pour une période, tant que le salarié a un loyer réglé,
 // à partir de sa date de début, et jusqu'à la fin de son contrat (CDD/Saisonnier) le cas échéant.
 // Compte les échéances mensuelles réelles (une par mois à partir de la date de début), peu importe
@@ -229,14 +241,14 @@ const loyerPourPeriode = (emp, start, end) => {
   const effectiveEnd = finContrat && finContrat < end ? finContrat : end;
   if (emp.loyerDebut > effectiveEnd) return 0;
 
-  const startDate = new Date(start + "T00:00:00");
-  const endDate = new Date(effectiveEnd + "T00:00:00");
-  let d = new Date(emp.loyerDebut + "T00:00:00");
   let count = 0;
+  let n = 0;
+  let due = emp.loyerDebut;
   let garde = 0;
-  while (d <= endDate && garde < 1200) {
-    if (d >= startDate) count++;
-    d.setMonth(d.getMonth() + 1);
+  while (due <= effectiveEnd && garde < 1200) {
+    if (due >= start) count++;
+    n++;
+    due = addMonthsClamped(emp.loyerDebut, n);
     garde++;
   }
   return count * montant;
