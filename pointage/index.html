@@ -503,7 +503,7 @@ function PointageApp() {
           />
         )}
         {tab === "syntheseHebdo" && <SyntheseHebdo employees={employees} entries={entries} heuresSup={heuresSup} heuresDefaut={heuresDefaut} />}
-        {tab === "feuillePointage" && <FeuillePointage employees={employees} entries={entries} />}
+        {tab === "feuillePointage" && <FeuillePointage employees={employees} entries={entries} heuresSup={heuresSup} />}
         {tab === "absences" && <Absences employees={employees} entries={entries} />}
         {tab === "conges" && (
           <CongesAbsences employees={employees} updateEmployees={updateEmployees} entries={entries} updateEntries={updateEntries} taches={taches} />
