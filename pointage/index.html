@@ -3883,7 +3883,8 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
   }, [entries, monthStart, monthEnd, heuresSup]);
 
   let masseSalariale = 0;
-  let heuresSupTotal = 0;
+  let heuresMajo1Total = 0;
+  let heuresMajo2Total = 0;
   employees.forEach((emp) => {
     const b = bruts[emp.id];
     if (!b) return;
@@ -3898,7 +3899,8 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
       .reduce((s, p) => s + p.montant, 0);
     const loyerMois = loyerPourPeriode(emp, monthStart, monthEnd);
     masseSalariale += net + primesMois - loyerMois + congesMois.montant;
-    heuresSupTotal += b.majo1 + b.majo2;
+    heuresMajo1Total += b.majo1;
+    heuresMajo2Total += b.majo2;
   });
 
   const avancesMois = transactions
@@ -4067,10 +4069,18 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
         </div>
         <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
           <div className="text-xs" style={{ color: "#8A8271" }}>
-            Heures majorées
+            Heures majorées +{heuresSup.tauxMajo1}%
           </div>
           <div className="text-lg font-bold" style={{ color: PALETTE.ink }}>
-            {fmtHours(heuresSupTotal)}
+            {fmtHours(heuresMajo1Total)}
+          </div>
+        </div>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+          <div className="text-xs" style={{ color: "#8A8271" }}>
+            Heures majorées +{heuresSup.tauxMajo2}%
+          </div>
+          <div className="text-lg font-bold" style={{ color: PALETTE.ink }}>
+            {fmtHours(heuresMajo2Total)}
           </div>
         </div>
         <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
@@ -4168,15 +4178,24 @@ function SyntheseHebdo({ employees, entries, heuresSup, heuresDefaut }) {
       .map((wk) => {
         const { eff, paye, congesPaye } = weeks[wk];
         const { majo1, majo2 } = splitOvertime(eff, heuresSup);
-        return { wk, eff, paye: paye + congesPaye, congesPaye, majorees: majo1 + majo2 };
+        return { wk, eff, paye: paye + congesPaye, congesPaye, majo1, majo2 };
       });
   };
 
   const exportCSV = () => {
-    const rows = [["Salarié", "Semaine", "Heures effectives", "Heures payées (dont congés payés)", "Heures majorées"]];
+    const rows = [
+      [
+        "Salarié",
+        "Semaine",
+        "Heures effectives",
+        "Heures payées (dont congés payés)",
+        `Majorées ${heuresSup.tauxMajo1}%`,
+        `Majorées ${heuresSup.tauxMajo2}%`,
+      ],
+    ];
     employeesAffiches.forEach((emp) => {
       semainesPour(emp.id).forEach((s) => {
-        rows.push([emp.nom, weekLabel(s.wk), s.eff.toFixed(2), s.paye.toFixed(2), s.majorees.toFixed(2)]);
+        rows.push([emp.nom, weekLabel(s.wk), s.eff.toFixed(2), s.paye.toFixed(2), s.majo1.toFixed(2), s.majo2.toFixed(2)]);
       });
     });
     const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -4290,18 +4309,19 @@ function SyntheseHebdo({ employees, entries, heuresSup, heuresDefaut }) {
                 <>
                   <div
                     className="grid px-4 py-2 text-xs font-medium"
-                    style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr", color: "#8A8271", borderBottom: `1px solid ${PALETTE.line}` }}
+                    style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", color: "#8A8271", borderBottom: `1px solid ${PALETTE.line}` }}
                   >
                     <span>Semaine</span>
                     <span className="text-right">Effectives</span>
                     <span className="text-right">Payées</span>
-                    <span className="text-right">Majorées</span>
+                    <span className="text-right">+{heuresSup.tauxMajo1}%</span>
+                    <span className="text-right">+{heuresSup.tauxMajo2}%</span>
                   </div>
                   {semaines.map((s, i) => (
                     <div
                       key={s.wk}
                       className="grid px-4 py-2 text-sm"
-                      style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr", borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+                      style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
                     >
                       <span style={{ color: "#6B6552" }}>
                         {weekLabel(s.wk)}
@@ -4309,20 +4329,26 @@ function SyntheseHebdo({ employees, entries, heuresSup, heuresDefaut }) {
                       </span>
                       <span className="text-right">{fmtHours(s.eff)}</span>
                       <span className="text-right">{fmtHours(s.paye)}</span>
-                      <span className="text-right" style={{ color: s.majorees > 0 ? PALETTE.rust : PALETTE.ink }}>
-                        {fmtHours(s.majorees)}
+                      <span className="text-right" style={{ color: s.majo1 > 0 ? PALETTE.rust : PALETTE.ink }}>
+                        {fmtHours(s.majo1)}
+                      </span>
+                      <span className="text-right" style={{ color: s.majo2 > 0 ? PALETTE.rust : PALETTE.ink }}>
+                        {fmtHours(s.majo2)}
                       </span>
                     </div>
                   ))}
                   <div
                     className="grid px-4 py-2 text-sm font-semibold"
-                    style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr", borderTop: `1px solid ${PALETTE.line}`, background: PALETTE.bg }}
+                    style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", borderTop: `1px solid ${PALETTE.line}`, background: PALETTE.bg }}
                   >
                     <span>Total</span>
                     <span className="text-right">{fmtHours(semaines.reduce((s, w) => s + w.eff, 0))}</span>
                     <span className="text-right">{fmtHours(semaines.reduce((s, w) => s + w.paye, 0))}</span>
                     <span className="text-right" style={{ color: PALETTE.rust }}>
-                      {fmtHours(semaines.reduce((s, w) => s + w.majorees, 0))}
+                      {fmtHours(semaines.reduce((s, w) => s + w.majo1, 0))}
+                    </span>
+                    <span className="text-right" style={{ color: PALETTE.rust }}>
+                      {fmtHours(semaines.reduce((s, w) => s + w.majo2, 0))}
                     </span>
                   </div>
                 </>
