@@ -89,6 +89,7 @@ const LayoutDashboard = mkIcon("🏠");
 const Lock = mkIcon("🔒");
 const AlertTriangle = mkIcon("⚠️");
 const Award = mkIcon("🏆");
+const Table = mkIcon("▦");
 
 
 // ---------- Helpers ----------
@@ -252,6 +253,20 @@ const loyerPourPeriode = (emp, start, end) => {
     garde++;
   }
   return count * montant;
+};
+
+// Calcule l'indemnité de congés payés dus sur une période (règle du maintien de salaire) :
+// chaque jour de congé payé déclaré (samedi inclus, dimanche jamais présent puisque exclu à la
+// déclaration) est payé comme une journée normale, aux heures par défaut et au taux horaire du salarié.
+// Estimation indicative — la règle du 1/10e n'est pas calculée, à comparer avec votre logiciel de paie.
+const congesPayesMontant = (emp, entries, heuresDefaut, start, end) => {
+  const r = Number(emp.tauxHoraire) || 0;
+  if (!r) return { heures: 0, jours: 0, montant: 0 };
+  const jours = entries.filter(
+    (e) => e.employeeId === emp.id && !e.present && e.motif === "Congé payé" && e.date >= start && e.date <= end
+  ).length;
+  const heures = jours * Number(heuresDefaut || 0);
+  return { heures, jours, montant: heures * r };
 };
 
 // Calcule la répartition heures normales / majorées 1 / majorées 2 pour un total hebdo payé
@@ -448,6 +463,7 @@ function PointageApp() {
             primes={primes}
             heuresSup={heuresSup}
             tauxCotisations={tauxCotisations}
+            heuresDefaut={heuresDefaut}
             lastBackupDate={lastBackupDate}
             setTab={setTab}
           />
@@ -482,15 +498,17 @@ function PointageApp() {
             primes={primes}
             heuresSup={heuresSup}
             tauxCotisations={tauxCotisations}
+            heuresDefaut={heuresDefaut}
           />
         )}
+        {tab === "syntheseHebdo" && <SyntheseHebdo employees={employees} entries={entries} heuresSup={heuresSup} />}
         {tab === "absences" && <Absences employees={employees} entries={entries} />}
         {tab === "conges" && (
           <CongesAbsences employees={employees} updateEmployees={updateEmployees} entries={entries} updateEntries={updateEntries} taches={taches} />
         )}
         {tab === "heuresSup" && <HeuresSup employees={employees} entries={entries} heuresSup={heuresSup} />}
         {tab === "simulation" && (
-          <SimulationPaie employees={employees} entries={entries} transactions={transactions} primes={primes} heuresSup={heuresSup} tauxCotisations={tauxCotisations} />
+          <SimulationPaie employees={employees} entries={entries} transactions={transactions} primes={primes} heuresSup={heuresSup} tauxCotisations={tauxCotisations} heuresDefaut={heuresDefaut} />
         )}
         {tab === "parametres" && (
           <Parametres
@@ -607,6 +625,7 @@ function TabBar({ tab, setTab }) {
     { id: "primes", label: "Primes", icon: Award },
     { id: "recap", label: "Récapitulatif", icon: BarChart3 },
     { id: "synthese", label: "Synthèse salarié", icon: FileText },
+    { id: "syntheseHebdo", label: "Compte rendu hebdo", icon: Table },
     { id: "absences", label: "Absences", icon: CalendarX },
     { id: "conges", label: "Congés & absences", icon: CalendarDays },
     { id: "heuresSup", label: "Heures sup", icon: TrendingUp },
@@ -2549,7 +2568,7 @@ function HeuresSup({ employees, entries, heuresSup }) {
 
 // ---------- Récapitulatif (summary + export) ----------
 // ---------- Simulation de paie (brut estimé + avances/acomptes/prêts) ----------
-function SimulationPaie({ employees, entries, transactions, primes, heuresSup, tauxCotisations }) {
+function SimulationPaie({ employees, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut }) {
   const [start, setStart] = useState(() => {
     const d = new Date();
     d.setDate(1);
@@ -2624,10 +2643,11 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
     const cotisations = brut * (Number(tauxCotisations) / 100);
     const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0, loyer: 0 };
     const loyerAuto = loyerPourPeriode(emp, start, end);
+    const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
     const deductions = m.avance + m.acompte + m.remboursement + loyerAuto;
     const primesMontant = primesParEmp[emp.id] || 0;
-    const net = brut - cotisations - deductions + primesMontant;
-    return { emp, b, brut, cotisations, m, deductions, loyerAuto, primesMontant, net };
+    const net = brut - cotisations - deductions + primesMontant + conges.montant;
+    return { emp, b, brut, cotisations, m, deductions, loyerAuto, conges, primesMontant, net };
   });
 
   const totalBrut = lignes.reduce((s, l) => s + l.brut, 0);
@@ -2733,7 +2753,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
       </p>
 
       <div className="space-y-2">
-        {lignes.map(({ emp, b, brut, cotisations, m, deductions, loyerAuto, primesMontant, net }) => {
+        {lignes.map(({ emp, b, brut, cotisations, m, deductions, loyerAuto, conges, primesMontant, net }) => {
           const hasRate = Number(emp.tauxHoraire) > 0;
           return (
             <div
@@ -2790,6 +2810,12 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
                     <div className="flex justify-between" style={{ color: PALETTE.rust }}>
                       <span>− Loyer (auto)</span>
                       <strong>{fmtEuros(loyerAuto)}</strong>
+                    </div>
+                  )}
+                  {conges.montant > 0 && (
+                    <div className="flex justify-between" style={{ color: PALETTE.green }}>
+                      <span>+ Congés payés ({conges.jours} j, maintien de salaire)</span>
+                      <strong>{fmtEuros(conges.montant)}</strong>
                     </div>
                   )}
                   {primesMontant > 0 && (
@@ -3228,7 +3254,7 @@ function CongesAbsences({ employees, updateEmployees, entries, updateEntries, ta
 
 // ---------- Synthèse par salarié (tout regroupé pour une période) ----------
 // ---------- Calcul des données de synthèse pour un salarié (réutilisé pour l'impression groupée) ----------
-function computeSyntheseData(emp, entries, transactions, primes, heuresSup, tauxCotisations, start, end) {
+function computeSyntheseData(emp, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut, start, end) {
   const employeeId = emp.id;
   const joursPointes = Array.from(
     new Set(entries.filter((e) => e.date >= start && e.date <= end).map((e) => e.date))
@@ -3300,7 +3326,8 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
   const deductionsPeriode = avancesPeriode + acomptesPeriode + remboursementsPeriode + loyerPeriode;
   const primesPeriode = primes.filter((p) => p.employeeId === employeeId && p.date >= start && p.date <= end);
   const primesMontant = primesPeriode.reduce((s, p) => s + p.montant, 0);
-  const net = brut - cotisations - deductionsPeriode + primesMontant;
+  const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
+  const net = brut - cotisations - deductionsPeriode + primesMontant + conges.montant;
 
   return {
     presences,
@@ -3321,6 +3348,7 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
     deductionsPeriode,
     primesPeriode,
     primesMontant,
+    conges,
     net,
   };
 }
@@ -3344,6 +3372,7 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
     remboursementsPeriode,
     loyerPeriode,
     primesMontant,
+    conges,
     net,
   } = data;
   return (
@@ -3524,6 +3553,12 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
                 <strong>{fmtEuros(loyerPeriode)}</strong>
               </div>
             )}
+            {conges.montant > 0 && (
+              <div className="flex justify-between" style={{ color: PALETTE.green }}>
+                <span>+ Congés payés ({conges.jours} j, maintien de salaire)</span>
+                <strong>{fmtEuros(conges.montant)}</strong>
+              </div>
+            )}
             {primesMontant > 0 && (
               <div className="flex justify-between" style={{ color: PALETTE.green }}>
                 <span>+ Primes (période)</span>
@@ -3544,8 +3579,10 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
   );
 }
 
-function SyntheseSalarie({ employees, entries, transactions, primes, heuresSup, tauxCotisations }) {
+function SyntheseSalarie({ employees, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut }) {
   const [employeeId, setEmployeeId] = useState(employees[0]?.id || "");
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [showSelector, setShowSelector] = useState(false);
   const [start, setStart] = useState(() => {
     const d = new Date();
     d.setDate(1);
@@ -3560,24 +3597,37 @@ function SyntheseSalarie({ employees, entries, transactions, primes, heuresSup, 
 
   const emp = employees.find((e) => e.id === employeeId);
 
-  const data = useMemo(
-    () => (emp ? computeSyntheseData(emp, entries, transactions, primes, heuresSup, tauxCotisations, start, end) : null),
-    [emp, entries, transactions, primes, heuresSup, tauxCotisations, start, end]
-  );
+  // Salariés à afficher à l'écran : la sélection multiple si active, sinon le salarié choisi dans le menu
+  const employeesAffiches = selectedIds.length > 0 ? employees.filter((e) => selectedIds.includes(e.id)) : emp ? [emp] : [];
+
+  const toggleSelected = (id) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
 
   const exportPDF = () => window.print();
 
-  const printAll = () => {
-    setBatchPrint(true);
-    setTimeout(() => {
-      window.print();
-      setBatchPrint(false);
-    }, 50);
-  };
+  // Attend que le rendu de toutes les fiches soit bien affiché avant de lancer l'impression,
+  // sinon le navigateur peut imprimer l'ancien état (un seul salarié) trop tôt.
+  useEffect(() => {
+    if (!batchPrint) return;
+    const id1 = requestAnimationFrame(() => {
+      const id2 = requestAnimationFrame(() => {
+        window.print();
+        setBatchPrint(false);
+      });
+      return () => cancelAnimationFrame(id2);
+    });
+    return () => cancelAnimationFrame(id1);
+  }, [batchPrint]);
+
+  const printAll = () => setBatchPrint(true);
 
   if (employees.length === 0) {
     return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
   }
+
+  // Salariés à imprimer en groupé : la sélection si active, sinon tous
+  const employeesAImprimer = selectedIds.length > 0 ? employees.filter((e) => selectedIds.includes(e.id)) : employees;
 
   return (
     <div>
@@ -3585,7 +3635,7 @@ function SyntheseSalarie({ employees, entries, transactions, primes, heuresSup, 
         <div className="font-bold text-lg">Synthèse salarié — Habitation Ressource</div>
       </div>
 
-      <div className="flex flex-wrap items-end gap-3 mb-6 no-print">
+      <div className="flex flex-wrap items-end gap-3 mb-3 no-print">
         <div>
           <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
             Salarié
@@ -3593,8 +3643,9 @@ function SyntheseSalarie({ employees, entries, transactions, primes, heuresSup, 
           <select
             value={employeeId}
             onChange={(e) => setEmployeeId(e.target.value)}
+            disabled={selectedIds.length > 0}
             className="px-2 py-2 rounded border text-sm min-w-[160px]"
-            style={{ borderColor: PALETTE.line }}
+            style={{ borderColor: PALETTE.line, opacity: selectedIds.length > 0 ? 0.5 : 1 }}
           >
             {employees.map((e) => (
               <option key={e.id} value={e.id}>
@@ -3639,25 +3690,74 @@ function SyntheseSalarie({ employees, entries, transactions, primes, heuresSup, 
           style={{ background: PALETTE.green }}
           className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
         >
-          <FileText size={16} /> PDF (tous les salariés)
+          <FileText size={16} />{" "}
+          {selectedIds.length > 0 ? `PDF (${selectedIds.length} sélectionné(s))` : "PDF (tous les salariés)"}
         </button>
       </div>
 
-      {!emp || !data ? (
-        <EmptyState text="Sélectionnez un salarié." />
+      <button onClick={() => setShowSelector((v) => !v)} className="text-xs underline mb-4 no-print" style={{ color: PALETTE.green }}>
+        {showSelector ? "Masquer" : "Sélectionner plusieurs salariés"}
+      </button>
+
+      {showSelector && (
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3 mb-4 no-print">
+          <div className="flex flex-wrap gap-2 mb-2">
+            {employees.map((e) => {
+              const checked = selectedIds.includes(e.id);
+              return (
+                <button
+                  key={e.id}
+                  onClick={() => toggleSelected(e.id)}
+                  className="px-3 py-1.5 rounded-full text-xs border"
+                  style={{
+                    borderColor: checked ? PALETTE.green : PALETTE.line,
+                    background: checked ? PALETTE.green : "#fff",
+                    color: checked ? "#fff" : PALETTE.ink,
+                  }}
+                >
+                  {e.nom}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex gap-3">
+            <button onClick={() => setSelectedIds(employees.map((e) => e.id))} className="text-xs underline" style={{ color: PALETTE.green }}>
+              Tout sélectionner
+            </button>
+            {selectedIds.length > 0 && (
+              <button onClick={() => setSelectedIds([])} className="text-xs underline" style={{ color: "#8A8271" }}>
+                Aucun (revenir au menu)
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {employeesAffiches.length === 0 ? (
+        <EmptyState text="Sélectionnez un ou plusieurs salariés." />
       ) : (
-        <div className={batchPrint ? "no-print" : ""}>
-          <FicheSalarieContent emp={emp} data={data} start={start} end={end} heuresSup={heuresSup} tauxCotisations={tauxCotisations} />
+        <div className={`space-y-8 ${batchPrint ? "no-print" : ""}`}>
+          {employeesAffiches.map((e) => (
+            <FicheSalarieContent
+              key={e.id}
+              emp={e}
+              data={computeSyntheseData(e, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut, start, end)}
+              start={start}
+              end={end}
+              heuresSup={heuresSup}
+              tauxCotisations={tauxCotisations}
+            />
+          ))}
         </div>
       )}
 
       {batchPrint && (
         <div className="print-only">
-          {employees.map((e, i) => (
+          {employeesAImprimer.map((e, i) => (
             <FicheSalarieContent
               key={e.id}
               emp={e}
-              data={computeSyntheseData(e, entries, transactions, primes, heuresSup, tauxCotisations, start, end)}
+              data={computeSyntheseData(e, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut, start, end)}
               start={start}
               end={end}
               heuresSup={heuresSup}
@@ -3745,7 +3845,7 @@ function PieChartSimple({ data }) {
   );
 }
 
-function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCotisations, lastBackupDate, setTab }) {
+function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut, lastBackupDate, setTab }) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
   const monthEnd = todayISO();
@@ -3794,7 +3894,8 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
       .filter((p) => p.employeeId === emp.id && p.date >= monthStart && p.date <= monthEnd)
       .reduce((s, p) => s + p.montant, 0);
     const loyerMois = loyerPourPeriode(emp, monthStart, monthEnd);
-    masseSalariale += net + primesMois - loyerMois;
+    const congesMois = congesPayesMontant(emp, entries, heuresDefaut, monthStart, monthEnd);
+    masseSalariale += net + primesMois - loyerMois + congesMois.montant;
     heuresSupTotal += b.majo1 + b.majo2;
   });
 
@@ -4019,6 +4120,202 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
       {employees.length === 0 && (
         <EmptyState text="Ajoutez vos salariés dans l'onglet « Salariés » pour commencer." />
       )}
+    </div>
+  );
+}
+
+
+// ---------- Compte rendu hebdomadaire (heures effectives / payées / majorées par semaine) ----------
+function SyntheseHebdo({ employees, entries, heuresSup }) {
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(todayISO());
+
+  const employeesAffiches = selectedIds.length > 0 ? employees.filter((e) => selectedIds.includes(e.id)) : employees;
+
+  const toggleSelected = (id) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  // Regroupe les heures par semaine pour un salarié donné, sur la période choisie
+  const semainesPour = (empId) => {
+    const weeks = {};
+    entries
+      .filter((e) => e.present && e.employeeId === empId && e.date >= start && e.date <= end)
+      .forEach((e) => {
+        const wk = weekStart(e.date);
+        if (!weeks[wk]) weeks[wk] = { eff: 0, paye: 0 };
+        weeks[wk].eff += Number(e.heuresEffectives || 0);
+        weeks[wk].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+      });
+    return Object.keys(weeks)
+      .sort()
+      .map((wk) => {
+        const { eff, paye } = weeks[wk];
+        const { majo1, majo2 } = splitOvertime(eff, heuresSup);
+        return { wk, eff, paye, majorees: majo1 + majo2 };
+      });
+  };
+
+  const exportCSV = () => {
+    const rows = [["Salarié", "Semaine", "Heures effectives", "Heures payées", "Heures majorées"]];
+    employeesAffiches.forEach((emp) => {
+      semainesPour(emp.id).forEach((s) => {
+        rows.push([emp.nom, weekLabel(s.wk), s.eff.toFixed(2), s.paye.toFixed(2), s.majorees.toFixed(2)]);
+      });
+    });
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `compte_rendu_hebdo_${start}_${end}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportPDF = () => window.print();
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  return (
+    <div>
+      <div className="print-only mb-4">
+        <div className="font-bold text-lg">Compte rendu hebdomadaire — Habitation Ressource</div>
+        <div className="text-sm">
+          Du {start} au {end}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 mb-3 no-print">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <button
+          onClick={exportCSV}
+          style={{ background: PALETTE.green }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> CSV
+        </button>
+        <button
+          onClick={exportPDF}
+          style={{ background: PALETTE.rust }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> PDF
+        </button>
+      </div>
+
+      <p className="text-xs mb-2 no-print" style={{ color: "#8A8271" }}>
+        Salariés inclus : {selectedIds.length > 0 ? `${selectedIds.length} sélectionné(s)` : "tous"}
+      </p>
+      <div className="flex flex-wrap gap-2 mb-4 no-print">
+        {employees.map((e) => {
+          const checked = selectedIds.includes(e.id);
+          return (
+            <button
+              key={e.id}
+              onClick={() => toggleSelected(e.id)}
+              className="px-3 py-1.5 rounded-full text-xs border"
+              style={{
+                borderColor: checked ? PALETTE.green : PALETTE.line,
+                background: checked ? PALETTE.green : "#fff",
+                color: checked ? "#fff" : PALETTE.ink,
+              }}
+            >
+              {e.nom}
+            </button>
+          );
+        })}
+        {selectedIds.length > 0 && (
+          <button onClick={() => setSelectedIds([])} className="text-xs underline" style={{ color: "#8A8271" }}>
+            Tout désélectionner
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-4">
+        {employeesAffiches.map((emp) => {
+          const semaines = semainesPour(emp.id);
+          return (
+            <div key={emp.id} style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+              <div className="px-4 py-2.5 font-medium" style={{ background: PALETTE.bg, borderBottom: `1px solid ${PALETTE.line}` }}>
+                {emp.nom}
+              </div>
+              {semaines.length === 0 ? (
+                <div className="px-4 py-3 text-sm" style={{ color: "#8A8271" }}>
+                  Aucune donnée sur cette période.
+                </div>
+              ) : (
+                <>
+                  <div
+                    className="grid px-4 py-2 text-xs font-medium"
+                    style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr", color: "#8A8271", borderBottom: `1px solid ${PALETTE.line}` }}
+                  >
+                    <span>Semaine</span>
+                    <span className="text-right">Effectives</span>
+                    <span className="text-right">Payées</span>
+                    <span className="text-right">Majorées</span>
+                  </div>
+                  {semaines.map((s, i) => (
+                    <div
+                      key={s.wk}
+                      className="grid px-4 py-2 text-sm"
+                      style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr", borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+                    >
+                      <span style={{ color: "#6B6552" }}>{weekLabel(s.wk)}</span>
+                      <span className="text-right">{fmtHours(s.eff)}</span>
+                      <span className="text-right">{fmtHours(s.paye)}</span>
+                      <span className="text-right" style={{ color: s.majorees > 0 ? PALETTE.rust : PALETTE.ink }}>
+                        {fmtHours(s.majorees)}
+                      </span>
+                    </div>
+                  ))}
+                  <div
+                    className="grid px-4 py-2 text-sm font-semibold"
+                    style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr", borderTop: `1px solid ${PALETTE.line}`, background: PALETTE.bg }}
+                  >
+                    <span>Total</span>
+                    <span className="text-right">{fmtHours(semaines.reduce((s, w) => s + w.eff, 0))}</span>
+                    <span className="text-right">{fmtHours(semaines.reduce((s, w) => s + w.paye, 0))}</span>
+                    <span className="text-right" style={{ color: PALETTE.rust }}>
+                      {fmtHours(semaines.reduce((s, w) => s + w.majorees, 0))}
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
