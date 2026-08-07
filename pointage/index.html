@@ -90,6 +90,7 @@ const Lock = mkIcon("🔒");
 const AlertTriangle = mkIcon("⚠️");
 const Award = mkIcon("🏆");
 const Table = mkIcon("▦");
+const ListChecks = mkIcon("☑");
 
 
 // ---------- Helpers ----------
@@ -502,6 +503,7 @@ function PointageApp() {
           />
         )}
         {tab === "syntheseHebdo" && <SyntheseHebdo employees={employees} entries={entries} heuresSup={heuresSup} heuresDefaut={heuresDefaut} />}
+        {tab === "feuillePointage" && <FeuillePointage employees={employees} entries={entries} />}
         {tab === "absences" && <Absences employees={employees} entries={entries} />}
         {tab === "conges" && (
           <CongesAbsences employees={employees} updateEmployees={updateEmployees} entries={entries} updateEntries={updateEntries} taches={taches} />
@@ -626,6 +628,7 @@ function TabBar({ tab, setTab }) {
     { id: "recap", label: "Récapitulatif", icon: BarChart3 },
     { id: "synthese", label: "Synthèse salarié", icon: FileText },
     { id: "syntheseHebdo", label: "Compte rendu hebdo", icon: Table },
+    { id: "feuillePointage", label: "Feuille de pointage", icon: ListChecks },
     { id: "absences", label: "Absences", icon: CalendarX },
     { id: "conges", label: "Congés & absences", icon: CalendarDays },
     { id: "heuresSup", label: "Heures sup", icon: TrendingUp },
@@ -4360,6 +4363,246 @@ function SyntheseHebdo({ employees, entries, heuresSup, heuresDefaut }) {
     </div>
   );
 }
+
+// ---------- Feuille de pointage détaillée par salarié (jour par jour, sur une période choisie) ----------
+function FeuillePointage({ employees, entries, heuresSup }) {
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(todayISO());
+
+  const employeesAffiches = selectedIds.length > 0 ? employees.filter((e) => selectedIds.includes(e.id)) : employees;
+
+  const toggleSelected = (id) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  // Construit la feuille d'un salarié : résumé (effectives/payées/majorées) + détail jour par jour
+  const feuillePour = (empId) => {
+    const entriesEmp = entries
+      .filter((e) => e.employeeId === empId && e.date >= start && e.date <= end)
+      .slice()
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const presences = entriesEmp.filter((e) => e.present);
+    const totalEff = presences.reduce((s, e) => s + Number(e.heuresEffectives || 0), 0);
+    const totalPaye = presences.reduce((s, e) => s + Number(e.heuresPayees ?? e.heuresEffectives ?? 0), 0);
+
+    // Heures sup : regroupement hebdomadaire sur les heures effectives
+    const weeks = {};
+    presences.forEach((e) => {
+      const wk = weekStart(e.date);
+      weeks[wk] = (weeks[wk] || 0) + Number(e.heuresEffectives || 0);
+    });
+    let majo1Total = 0,
+      majo2Total = 0;
+    Object.values(weeks).forEach((eff) => {
+      const { majo1, majo2 } = splitOvertime(eff, heuresSup);
+      majo1Total += majo1;
+      majo2Total += majo2;
+    });
+
+    return { entriesEmp, totalEff, totalPaye, majo1Total, majo2Total, joursPresent: new Set(presences.map((e) => e.date)).size };
+  };
+
+  const exportCSV = () => {
+    const rows = [["Salarié", "Date", "Statut", "Tâche / Motif", "Heures effectives", "Heures payées", "Parcelle"]];
+    employeesAffiches.forEach((emp) => {
+      const { entriesEmp } = feuillePour(emp.id);
+      entriesEmp.forEach((e) => {
+        rows.push([
+          emp.nom,
+          e.date,
+          e.present ? "Présent" : "Absent",
+          e.present ? e.tache : e.motif || "",
+          e.present ? Number(e.heuresEffectives || 0).toFixed(2) : "",
+          e.present ? Number(e.heuresPayees ?? e.heuresEffectives ?? 0).toFixed(2) : "",
+          e.present ? e.parcelle || "" : "",
+        ]);
+      });
+    });
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `feuille_pointage_${start}_${end}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportPDF = () => window.print();
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  return (
+    <div>
+      <div className="print-only mb-4">
+        <div className="font-bold text-lg">Feuille de pointage — Habitation Ressource</div>
+        <div className="text-sm">
+          Du {start} au {end}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 mb-3 no-print">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <button
+          onClick={exportCSV}
+          style={{ background: PALETTE.green }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> CSV
+        </button>
+        <button
+          onClick={exportPDF}
+          style={{ background: PALETTE.rust }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> PDF
+        </button>
+      </div>
+
+      <p className="text-xs mb-2 no-print" style={{ color: "#8A8271" }}>
+        Salariés inclus : {selectedIds.length > 0 ? `${selectedIds.length} sélectionné(s)` : "tous"}
+      </p>
+      <div className="flex flex-wrap gap-2 mb-6 no-print">
+        {employees.map((e) => {
+          const checked = selectedIds.includes(e.id);
+          return (
+            <button
+              key={e.id}
+              onClick={() => toggleSelected(e.id)}
+              className="px-3 py-1.5 rounded-full text-xs border"
+              style={{
+                borderColor: checked ? PALETTE.green : PALETTE.line,
+                background: checked ? PALETTE.green : "#fff",
+                color: checked ? "#fff" : PALETTE.ink,
+              }}
+            >
+              {e.nom}
+            </button>
+          );
+        })}
+        {selectedIds.length > 0 && (
+          <button onClick={() => setSelectedIds([])} className="text-xs underline" style={{ color: "#8A8271" }}>
+            Tout désélectionner
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-8">
+        {employeesAffiches.map((emp, empIdx) => {
+          const { entriesEmp, totalEff, totalPaye, majo1Total, majo2Total, joursPresent } = feuillePour(emp.id);
+          return (
+            <div key={emp.id} style={empIdx > 0 ? { pageBreakBefore: "always" } : undefined}>
+              {/* En-tête */}
+              <div style={{ background: PALETTE.greenDark }} className="rounded-md p-4 text-white mb-3">
+                <div className="text-lg font-bold">{emp.nom}</div>
+                <div className="text-xs opacity-70">
+                  Du {start} au {end}
+                </div>
+              </div>
+
+              {/* Résumé */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+                <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+                  <div className="text-xs" style={{ color: "#8A8271" }}>
+                    Jours présent
+                  </div>
+                  <div className="text-lg font-bold">{joursPresent}</div>
+                </div>
+                <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+                  <div className="text-xs" style={{ color: "#8A8271" }}>
+                    Heures effectives
+                  </div>
+                  <div className="text-lg font-bold">{fmtHours(totalEff)}</div>
+                </div>
+                <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+                  <div className="text-xs" style={{ color: "#8A8271" }}>
+                    Heures payées
+                  </div>
+                  <div className="text-lg font-bold">{fmtHours(totalPaye)}</div>
+                </div>
+                <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
+                  <div className="text-xs" style={{ color: "#8A8271" }}>
+                    Heures sup (+{heuresSup.tauxMajo1}% / +{heuresSup.tauxMajo2}%)
+                  </div>
+                  <div className="text-lg font-bold" style={{ color: PALETTE.rust }}>
+                    {fmtHours(majo1Total)} / {fmtHours(majo2Total)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Détail jour par jour */}
+              <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+                <div
+                  className="grid px-4 py-2 text-xs font-medium"
+                  style={{ gridTemplateColumns: "1.3fr 1fr 2fr 1fr 1fr 1fr", color: "#8A8271", borderBottom: `1px solid ${PALETTE.line}` }}
+                >
+                  <span>Date</span>
+                  <span>Statut</span>
+                  <span>Tâche / Motif</span>
+                  <span className="text-right">Effectives</span>
+                  <span className="text-right">Payées</span>
+                  <span>Parcelle</span>
+                </div>
+                {entriesEmp.length === 0 ? (
+                  <div className="px-4 py-3 text-sm" style={{ color: "#8A8271" }}>
+                    Aucune donnée sur cette période.
+                  </div>
+                ) : (
+                  entriesEmp.map((e, i) => (
+                    <div
+                      key={e.id}
+                      className="grid px-4 py-2 text-sm items-center"
+                      style={{ gridTemplateColumns: "1.3fr 1fr 2fr 1fr 1fr 1fr", borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+                    >
+                      <span style={{ color: "#6B6552" }}>{e.date}</span>
+                      <span style={{ color: e.present ? PALETTE.green : PALETTE.rust }}>{e.present ? "Présent" : "Absent"}</span>
+                      <span>{e.present ? e.tache : e.motif || "—"}</span>
+                      <span className="text-right">{e.present ? fmtHours(Number(e.heuresEffectives || 0)) : "—"}</span>
+                      <span className="text-right">{e.present ? fmtHours(Number(e.heuresPayees ?? e.heuresEffectives ?? 0)) : "—"}</span>
+                      <span style={{ color: "#8A8271" }}>{e.present ? e.parcelle || "—" : "—"}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 
 function Recap({ employees, entries }) {
   const [start, setStart] = useState(() => {
