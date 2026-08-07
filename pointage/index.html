@@ -501,7 +501,7 @@ function PointageApp() {
             heuresDefaut={heuresDefaut}
           />
         )}
-        {tab === "syntheseHebdo" && <SyntheseHebdo employees={employees} entries={entries} heuresSup={heuresSup} />}
+        {tab === "syntheseHebdo" && <SyntheseHebdo employees={employees} entries={entries} heuresSup={heuresSup} heuresDefaut={heuresDefaut} />}
         {tab === "absences" && <Absences employees={employees} entries={entries} />}
         {tab === "conges" && (
           <CongesAbsences employees={employees} updateEmployees={updateEmployees} entries={entries} updateEntries={updateEntries} taches={taches} />
@@ -2640,10 +2640,11 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
         b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
         b.extraPaye * r
       : 0;
-    const cotisations = brut * (Number(tauxCotisations) / 100);
+    const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
+    // Les indemnités de congés payés sont soumises aux cotisations, comme le salaire normal
+    const cotisations = (brut + conges.montant) * (Number(tauxCotisations) / 100);
     const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0, loyer: 0 };
     const loyerAuto = loyerPourPeriode(emp, start, end);
-    const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
     const deductions = m.avance + m.acompte + m.remboursement + loyerAuto;
     const primesMontant = primesParEmp[emp.id] || 0;
     const net = brut - cotisations - deductions + primesMontant + conges.montant;
@@ -3318,7 +3319,9 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
       heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
       heuresSupCalc.extraPaye * r
     : 0;
-  const cotisations = brut * (Number(tauxCotisations) / 100);
+  const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
+  // Les indemnités de congés payés sont soumises aux cotisations, comme le salaire normal
+  const cotisations = (brut + conges.montant) * (Number(tauxCotisations) / 100);
   const avancesPeriode = mouvementsPeriode.filter((t) => t.type === "avance").reduce((s, t) => s + t.montant, 0);
   const acomptesPeriode = mouvementsPeriode.filter((t) => t.type === "acompte").reduce((s, t) => s + t.montant, 0);
   const remboursementsPeriode = mouvementsPeriode.filter((t) => t.type === "remboursement").reduce((s, t) => s + t.montant, 0);
@@ -3326,7 +3329,6 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
   const deductionsPeriode = avancesPeriode + acomptesPeriode + remboursementsPeriode + loyerPeriode;
   const primesPeriode = primes.filter((p) => p.employeeId === employeeId && p.date >= start && p.date <= end);
   const primesMontant = primesPeriode.reduce((s, p) => s + p.montant, 0);
-  const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
   const net = brut - cotisations - deductionsPeriode + primesMontant + conges.montant;
 
   return {
@@ -3889,12 +3891,12 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
     const brut = r
       ? b.normales * r + b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) + b.extraPaye * r
       : 0;
-    const net = brut - brut * (Number(tauxCotisations) / 100);
+    const congesMois = congesPayesMontant(emp, entries, heuresDefaut, monthStart, monthEnd);
+    const net = brut - (brut + congesMois.montant) * (Number(tauxCotisations) / 100);
     const primesMois = primes
       .filter((p) => p.employeeId === emp.id && p.date >= monthStart && p.date <= monthEnd)
       .reduce((s, p) => s + p.montant, 0);
     const loyerMois = loyerPourPeriode(emp, monthStart, monthEnd);
-    const congesMois = congesPayesMontant(emp, entries, heuresDefaut, monthStart, monthEnd);
     masseSalariale += net + primesMois - loyerMois + congesMois.montant;
     heuresSupTotal += b.majo1 + b.majo2;
   });
@@ -4126,7 +4128,7 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
 
 
 // ---------- Compte rendu hebdomadaire (heures effectives / payées / majorées par semaine) ----------
-function SyntheseHebdo({ employees, entries, heuresSup }) {
+function SyntheseHebdo({ employees, entries, heuresSup, heuresDefaut }) {
   const [selectedIds, setSelectedIds] = useState([]);
   const [start, setStart] = useState(() => {
     const d = new Date();
@@ -4141,28 +4143,37 @@ function SyntheseHebdo({ employees, entries, heuresSup }) {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
-  // Regroupe les heures par semaine pour un salarié donné, sur la période choisie
+  // Regroupe les heures par semaine pour un salarié donné, sur la période choisie.
+  // Les jours de congés payés sont ajoutés aux heures payées (maintien de salaire), pas aux
+  // heures effectives, et ne comptent pas dans le calcul des heures majorées.
   const semainesPour = (empId) => {
     const weeks = {};
     entries
       .filter((e) => e.present && e.employeeId === empId && e.date >= start && e.date <= end)
       .forEach((e) => {
         const wk = weekStart(e.date);
-        if (!weeks[wk]) weeks[wk] = { eff: 0, paye: 0 };
+        if (!weeks[wk]) weeks[wk] = { eff: 0, paye: 0, congesPaye: 0 };
         weeks[wk].eff += Number(e.heuresEffectives || 0);
         weeks[wk].paye += Number(e.heuresPayees ?? e.heuresEffectives ?? 0);
+      });
+    entries
+      .filter((e) => !e.present && e.motif === "Congé payé" && e.employeeId === empId && e.date >= start && e.date <= end)
+      .forEach((e) => {
+        const wk = weekStart(e.date);
+        if (!weeks[wk]) weeks[wk] = { eff: 0, paye: 0, congesPaye: 0 };
+        weeks[wk].congesPaye += Number(heuresDefaut || 0);
       });
     return Object.keys(weeks)
       .sort()
       .map((wk) => {
-        const { eff, paye } = weeks[wk];
+        const { eff, paye, congesPaye } = weeks[wk];
         const { majo1, majo2 } = splitOvertime(eff, heuresSup);
-        return { wk, eff, paye, majorees: majo1 + majo2 };
+        return { wk, eff, paye: paye + congesPaye, congesPaye, majorees: majo1 + majo2 };
       });
   };
 
   const exportCSV = () => {
-    const rows = [["Salarié", "Semaine", "Heures effectives", "Heures payées", "Heures majorées"]];
+    const rows = [["Salarié", "Semaine", "Heures effectives", "Heures payées (dont congés payés)", "Heures majorées"]];
     employeesAffiches.forEach((emp) => {
       semainesPour(emp.id).forEach((s) => {
         rows.push([emp.nom, weekLabel(s.wk), s.eff.toFixed(2), s.paye.toFixed(2), s.majorees.toFixed(2)]);
@@ -4235,7 +4246,8 @@ function SyntheseHebdo({ employees, entries, heuresSup }) {
       </div>
 
       <p className="text-xs mb-2 no-print" style={{ color: "#8A8271" }}>
-        Salariés inclus : {selectedIds.length > 0 ? `${selectedIds.length} sélectionné(s)` : "tous"}
+        Salariés inclus : {selectedIds.length > 0 ? `${selectedIds.length} sélectionné(s)` : "tous"}. Les congés
+        payés sont intégrés aux heures payées (maintien de salaire), pas aux heures effectives.
       </p>
       <div className="flex flex-wrap gap-2 mb-4 no-print">
         {employees.map((e) => {
@@ -4291,7 +4303,10 @@ function SyntheseHebdo({ employees, entries, heuresSup }) {
                       className="grid px-4 py-2 text-sm"
                       style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr", borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
                     >
-                      <span style={{ color: "#6B6552" }}>{weekLabel(s.wk)}</span>
+                      <span style={{ color: "#6B6552" }}>
+                        {weekLabel(s.wk)}
+                        {s.congesPaye > 0 ? ` · dont ${fmtHours(s.congesPaye)} CP` : ""}
+                      </span>
                       <span className="text-right">{fmtHours(s.eff)}</span>
                       <span className="text-right">{fmtHours(s.paye)}</span>
                       <span className="text-right" style={{ color: s.majorees > 0 ? PALETTE.rust : PALETTE.ink }}>
@@ -4319,7 +4334,6 @@ function SyntheseHebdo({ employees, entries, heuresSup }) {
     </div>
   );
 }
-
 
 function Recap({ employees, entries }) {
   const [start, setStart] = useState(() => {
