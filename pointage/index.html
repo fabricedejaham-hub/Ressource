@@ -170,7 +170,7 @@ const DEFAULT_HS = {
 // selon le réglage choisi (heures effectives, ou heures payées)
 const overtimeBase = (hs, eff, paye) => ((hs && hs.base) === "payees" ? paye : eff);
 
-// Compte les jours ouvrés (hors dimanche et jours fériés) dans une période
+// Compte les jours ouvrables (lundi-samedi, hors dimanche et jours fériés) dans une période
 const countJoursOuvres = (start, end) => {
   let count = 0;
   let d = new Date(start + "T00:00:00");
@@ -207,20 +207,25 @@ const baseNominaleProratisee = (emp, start, end, heuresBaseMensualisee) => {
 // Base mensuelle (151,67h par défaut) réduite au prorata des jours d'absence NON payée sur la période
 // (le congé payé n'entre pas dans cette retenue, il est déjà rémunéré séparément ailleurs)
 const absenceRetenueInfo = (emp, entries, start, end, heuresDefaut) => {
-  const joursAbsenceNonPayee = entries.filter(
-    (e) =>
-      e.employeeId === emp.id &&
-      !e.present &&
-      e.date >= start &&
-      e.date <= end &&
-      e.motif !== "Congé payé" &&
-      !isWeekend(e.date) &&
-      !isJourFerie(e.date)
-  ).length;
-  // Retenue = heures par défaut du salarié (réglage Paramètres), par jour d'absence non payée —
-  // même logique que le maintien de salaire des congés payés, pour rester cohérent dans toute l'appli.
-  const retenueHeures = joursAbsenceNonPayee * Number(heuresDefaut || 0);
-  return { joursAbsenceNonPayee, retenueHeures };
+  const datesAbsenceNonPayee = entries
+    .filter(
+      (e) =>
+        e.employeeId === emp.id &&
+        !e.present &&
+        e.date >= start &&
+        e.date <= end &&
+        e.motif !== "Congé payé" &&
+        new Date(e.date + "T00:00:00").getDay() !== 0 &&
+        !isJourFerie(e.date)
+    )
+    .map((e) => ({ date: e.date, motif: e.motif || "Autre" }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const joursAbsenceNonPayee = datesAbsenceNonPayee.length;
+  // Retenue = heures habituelles DE CE SALARIÉ (temps partiel pris en compte si réglé), par jour
+  // d'absence non payée — même logique que le maintien de salaire des congés payés (cohérence).
+  const heuresParJour = Number(emp.heuresJournalieres) > 0 ? Number(emp.heuresJournalieres) : Number(heuresDefaut || 0);
+  const retenueHeures = joursAbsenceNonPayee * heuresParJour;
+  return { joursAbsenceNonPayee, retenueHeures, datesAbsenceNonPayee };
 };
 
 const baseMensuelleAjustee = (emp, entries, start, end, heuresBaseMensualisee, heuresDefaut) => {
@@ -355,6 +360,7 @@ const joursFeries = (year) => {
     toISO(addDays(paques, 1)), // Lundi de Pâques
     `${year}-05-01`, // Fête du travail
     `${year}-05-08`, // Victoire 1945
+    `${year}-05-22`, // Abolition de l'esclavage (jour férié local, Martinique)
     toISO(addDays(paques, 39)), // Ascension
     toISO(addDays(paques, 50)), // Lundi de Pentecôte
     `${year}-07-14`, // Fête nationale
@@ -409,16 +415,21 @@ const loyerPourPeriode = (emp, start, end) => {
 
 // Calcule l'indemnité de congés payés dus sur une période (règle du maintien de salaire) :
 // chaque jour de congé payé déclaré (samedi inclus, dimanche jamais présent puisque exclu à la
-// déclaration) est payé comme une journée normale, aux heures par défaut et au taux horaire du salarié.
+// déclaration) est payé comme une journée normale, aux heures habituelles DE CE SALARIÉ (temps
+// partiel pris en compte si réglé) et au taux horaire du salarié. Sans réglage propre au salarié,
+// utilise les heures par défaut globales (Paramètres) — comportement inchangé pour un temps plein.
 // Estimation indicative — la règle du 1/10e n'est pas calculée, à comparer avec votre logiciel de paie.
 const congesPayesMontant = (emp, entries, heuresDefaut, start, end) => {
   const r = Number(emp.tauxHoraire) || 0;
-  if (!r) return { heures: 0, jours: 0, montant: 0 };
-  const jours = entries.filter(
-    (e) => e.employeeId === emp.id && !e.present && e.motif === "Congé payé" && e.date >= start && e.date <= end
-  ).length;
-  const heures = jours * Number(heuresDefaut || 0);
-  return { heures, jours, montant: heures * r };
+  const datesConges = entries
+    .filter((e) => e.employeeId === emp.id && !e.present && e.motif === "Congé payé" && e.date >= start && e.date <= end)
+    .map((e) => e.date)
+    .sort();
+  if (!r) return { heures: 0, jours: 0, montant: 0, datesConges };
+  const heuresParJour = Number(emp.heuresJournalieres) > 0 ? Number(emp.heuresJournalieres) : Number(heuresDefaut || 0);
+  const jours = datesConges.length;
+  const heures = jours * heuresParJour;
+  return { heures, jours, montant: heures * r, datesConges };
 };
 
 // Calcule la répartition heures normales / majorées 1 / majorées 2 pour un total hebdo payé
@@ -904,21 +915,23 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
   };
 
   const addSegment = (empId) => {
+    const emp = employees.find((e) => e.id === empId);
+    const heuresParJour = emp && Number(emp.heuresJournalieres) > 0 ? Number(emp.heuresJournalieres) : heuresDefaut;
     const base = {
       id: uid(),
       date: selectedDate,
       employeeId: empId,
       present: true,
-      heuresEffectives: heuresDefaut,
-      heuresPayees: heuresDefaut,
+      heuresEffectives: heuresParJour,
+      heuresPayees: heuresParJour,
       tache: taches[0],
       parcelle: "",
       note: "",
     };
     if (!tachesEcart.includes(base.tache)) base.heuresPayees = base.heuresEffectives;
-    // Si une entrée d'absence existait pour ce jour, on la retire en ajoutant le premier poste
-    const abs = absenceFor(empId);
-    const next = abs ? entries.filter((e) => e.id !== abs.id) : entries;
+    // Retire TOUTE entrée d'absence existante pour ce jour (pas juste la première trouvée, au cas
+    // où un doublon se serait glissé dans les données) avant d'ajouter le premier poste.
+    const next = entries.filter((e) => !(e.employeeId === empId && e.date === selectedDate && !e.present));
     updateEntries([...next, base]);
   };
 
@@ -927,16 +940,13 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
   };
 
   const setMotif = (empId, motif) => {
-    const abs = absenceFor(empId);
-    let next;
-    if (abs) {
-      next = entries.map((e) => (e.id === abs.id ? { ...e, motif } : e));
-    } else {
-      next = [
-        ...entries,
-        { id: uid(), date: selectedDate, employeeId: empId, present: false, motif, heuresEffectives: 0, heuresPayees: 0, tache: taches[0], parcelle: "", note: "" },
-      ];
-    }
+    // Retire TOUTE entrée d'absence existante pour ce jour (au cas où un doublon existerait) et la
+    // remplace par une seule entrée propre avec le nouveau motif.
+    const sansAncienneAbsence = entries.filter((e) => !(e.employeeId === empId && e.date === selectedDate && !e.present));
+    let next = [
+      ...sansAncienneAbsence,
+      { id: uid(), date: selectedDate, employeeId: empId, present: false, motif, heuresEffectives: 0, heuresPayees: 0, tache: taches[0], parcelle: "", note: "" },
+    ];
     next = withCongeExtension(next, empId, selectedDate, motif, employees.find((e) => e.id === empId));
     updateEntries(next);
   };
@@ -1346,20 +1356,23 @@ function PointageMensuel({ employees, entries, updateEntries, tachesEcart, tache
   };
 
   const addSegment = (date) => {
+    const emp = employees.find((e) => e.id === employeeId);
+    const heuresParJour = emp && Number(emp.heuresJournalieres) > 0 ? Number(emp.heuresJournalieres) : heuresDefaut;
     const base = {
       id: uid(),
       date,
       employeeId,
       present: true,
-      heuresEffectives: heuresDefaut,
-      heuresPayees: heuresDefaut,
+      heuresEffectives: heuresParJour,
+      heuresPayees: heuresParJour,
       tache: taches[0],
       parcelle: "",
       note: "",
     };
     if (!tachesEcart.includes(base.tache)) base.heuresPayees = base.heuresEffectives;
-    const abs = absenceFor(date);
-    const next = abs ? entries.filter((e) => e.id !== abs.id) : entries;
+    // Retire TOUTE entrée d'absence existante pour ce jour (pas juste la première trouvée, au cas
+    // où un doublon se serait glissé dans les données) avant d'ajouter le premier poste.
+    const next = entries.filter((e) => !(e.employeeId === employeeId && e.date === date && !e.present));
     updateEntries([...next, base]);
   };
 
@@ -1376,16 +1389,13 @@ function PointageMensuel({ employees, entries, updateEntries, tachesEcart, tache
   };
 
   const setMotif = (date, motif) => {
-    const abs = absenceFor(date);
-    let next;
-    if (abs) {
-      next = entries.map((e) => (e.id === abs.id ? { ...e, motif } : e));
-    } else {
-      next = [
-        ...entries,
-        { id: uid(), date, employeeId, present: false, motif, heuresEffectives: 0, heuresPayees: 0, tache: taches[0], parcelle: "", note: "" },
-      ];
-    }
+    // Retire TOUTE entrée d'absence existante pour ce jour (au cas où un doublon existerait) et la
+    // remplace par une seule entrée propre avec le nouveau motif.
+    const sansAncienneAbsence = entries.filter((e) => !(e.employeeId === employeeId && e.date === date && !e.present));
+    let next = [
+      ...sansAncienneAbsence,
+      { id: uid(), date, employeeId, present: false, motif, heuresEffectives: 0, heuresPayees: 0, tache: taches[0], parcelle: "", note: "" },
+    ];
     next = withCongeExtension(next, employeeId, date, motif, employees.find((e) => e.id === employeeId));
     updateEntries(next);
   };
@@ -1865,6 +1875,20 @@ function Salaries({ employees, updateEmployees }) {
                   className="px-2 py-1.5 rounded border text-xs w-24"
                   style={{ borderColor: PALETTE.line }}
                   title="Laisser vide pour temps plein (151,67h par défaut). Renseigner pour un temps partiel (ex: 86,67h pour 20h/semaine)."
+                />
+                <span className="text-xs" style={{ color: "#8A8271" }}>
+                  Heures/jour :
+                </span>
+                <input
+                  type="number"
+                  step="0.25"
+                  min="0"
+                  placeholder="7"
+                  value={emp.heuresJournalieres ?? ""}
+                  onChange={(e) => updateField(emp.id, "heuresJournalieres", e.target.value)}
+                  className="px-2 py-1.5 rounded border text-xs w-20"
+                  style={{ borderColor: PALETTE.line }}
+                  title="Heures habituelles par jour de ce salarié — utilisé pour les congés payés et comme valeur par défaut au pointage. Laisser vide pour utiliser les heures par défaut réglées dans Paramètres."
                 />
                 {(emp.typeContrat === "CDD" || emp.typeContrat === "Saisonnier") && (
                   <>
@@ -2821,6 +2845,38 @@ function Parametres({
   const [editValue, setEditValue] = useState("");
   const [restoreMsg, setRestoreMsg] = useState("");
   const [pinInput, setPinInput] = useState(pinCode || "");
+  const [nettoyageMsg, setNettoyageMsg] = useState("");
+
+  // Retire les entrées d'absence en double (même salarié + même jour, plusieurs entrées non
+  // présentes) — garde celle qui a un motif renseigné en priorité, sinon la plus récente.
+  const nettoyerDoublonsAbsences = () => {
+    const absences = entries.filter((e) => !e.present);
+    const groupes = {};
+    absences.forEach((e) => {
+      const cle = `${e.employeeId}|${e.date}`;
+      if (!groupes[cle]) groupes[cle] = [];
+      groupes[cle].push(e);
+    });
+    const idsAGarder = new Set();
+    let doublonsSupprimes = 0;
+    Object.values(groupes).forEach((groupe) => {
+      if (groupe.length <= 1) {
+        idsAGarder.add(groupe[0].id);
+        return;
+      }
+      const avecMotif = groupe.filter((e) => e.motif);
+      const choisi = (avecMotif.length > 0 ? avecMotif : groupe)[avecMotif.length > 0 ? avecMotif.length - 1 : groupe.length - 1];
+      idsAGarder.add(choisi.id);
+      doublonsSupprimes += groupe.length - 1;
+    });
+    if (doublonsSupprimes === 0) {
+      setNettoyageMsg("Aucun doublon trouvé — vos données sont propres.");
+      return;
+    }
+    const next = entries.filter((e) => e.present || idsAGarder.has(e.id));
+    updateEntries(next);
+    setNettoyageMsg(`${doublonsSupprimes} entrée(s) en double supprimée(s).`);
+  };
 
   const exportBackup = () => {
     const backup = {
@@ -3194,6 +3250,28 @@ function Parametres({
       </div>
 
       <div>
+        <h2 className="font-semibold mb-1">Nettoyage des données</h2>
+        <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
+          Si un jour d'absence apparaît en double (par exemple après plusieurs modifications rapides),
+          cet outil retire les doublons — il ne touche jamais aux jours réellement travaillés.
+        </p>
+        <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4">
+          <button
+            onClick={nettoyerDoublonsAbsences}
+            style={{ background: PALETTE.rust }}
+            className="px-4 py-2 rounded text-white text-sm font-medium"
+          >
+            Nettoyer les doublons d'absence
+          </button>
+          {nettoyageMsg && (
+            <p className="text-xs mt-2" style={{ color: PALETTE.green }}>
+              {nettoyageMsg}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div>
         <h2 className="font-semibold mb-1">Sauvegarde et restauration</h2>
         <p className="text-sm mb-4" style={{ color: "#8A8271" }}>
           Toutes vos données (salariés, pointages, avances, réglages) sont stockées uniquement dans ce navigateur.
@@ -3512,9 +3590,9 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
     const r = rate(emp);
     const mensualise = heuresSup.mode === "mensualise";
     const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
-    const { joursAbsenceNonPayee, retenueHeures } = mensualise
+    const { joursAbsenceNonPayee, retenueHeures, datesAbsenceNonPayee } = mensualise
       ? absenceRetenueInfo(emp, entries, start, end, heuresDefaut)
-      : { joursAbsenceNonPayee: 0, retenueHeures: 0 };
+      : { joursAbsenceNonPayee: 0, retenueHeures: 0, datesAbsenceNonPayee: [] };
     const baseNominale = mensualise ? baseNominaleProratisee(emp, start, end, heuresSup.heuresBaseMensualisee) : 0;
     const baseAjustee = mensualise ? Math.max(0, baseNominale - retenueHeures) : 0;
     // En mode mensualisé, les jours de congé payé comptent comme des heures normales pour ne pas
@@ -3530,13 +3608,14 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
         b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
       : 0;
     const primesMontant = primesParEmp[emp.id] || 0;
-    // Les primes sont soumises aux cotisations, comme le salaire normal (les congés payés le sont
-    // aussi mais sont déjà inclus dans "brut" en mode mensualisé — ou ajoutés ci-dessous sinon)
-    const cotisations = (brut + (mensualise ? 0 : conges.montant) + primesMontant) * (Number(tauxCotisations) / 100);
+    // Les primes sont soumises aux cotisations, comme le salaire normal. Les congés payés le sont
+    // aussi, mais sont déjà inclus dans "brut" (dans les deux branches ci-dessus) — ne pas les
+    // rajouter ici, sinon ils seraient comptés deux fois dans le net.
+    const cotisations = (brut + primesMontant) * (Number(tauxCotisations) / 100);
     const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0, loyer: 0 };
     const loyerAuto = loyerPourPeriode(emp, start, end);
     const deductions = m.avance + m.acompte + m.remboursement + loyerAuto;
-    const net = brut - cotisations - deductions + primesMontant + (mensualise ? 0 : conges.montant);
+    const net = brut - cotisations - deductions + primesMontant;
     return {
       emp,
       b,
@@ -3551,6 +3630,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
       heuresBase,
       heuresExcedent,
       joursAbsenceNonPayee,
+      datesAbsenceNonPayee,
       retenueHeures,
       net,
     };
@@ -3667,7 +3747,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
 
       <div className="space-y-2">
         {lignes.map(
-          ({ emp, b, brut, cotisations, m, deductions, loyerAuto, conges, primesMontant, heuresBase, heuresExcedent, baseNominale, joursAbsenceNonPayee, retenueHeures, net }) => {
+          ({ emp, b, brut, cotisations, m, deductions, loyerAuto, conges, primesMontant, heuresBase, heuresExcedent, baseNominale, joursAbsenceNonPayee, retenueHeures, datesAbsenceNonPayee, net }) => {
           const hasRate = Number(emp.tauxHoraire) > 0;
           return (
             <div
@@ -3707,20 +3787,30 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
                         </div>
                       )}
                       {retenueHeures > 0 && (
-                        <div className="flex justify-between" style={{ color: PALETTE.rust }}>
-                          <span>
-                            − Absence non payée ({joursAbsenceNonPayee} j{joursAbsenceNonPayee > 1 ? "ours" : "our"})
-                          </span>
-                          <span>{fmtHours(retenueHeures)}</span>
-                        </div>
+                        <>
+                          <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                            <span>
+                              − Absence non payée ({joursAbsenceNonPayee} j{joursAbsenceNonPayee > 1 ? "ours" : "our"})
+                            </span>
+                            <span>{fmtHours(retenueHeures)}</span>
+                          </div>
+                          <div className="pl-3" style={{ color: "#8A8271" }}>
+                            {datesAbsenceNonPayee.map((a) => `${fmtDateLong(a.date)} (${a.motif})`).join(" · ")}
+                          </div>
+                        </>
                       )}
                       {conges.jours > 0 && (
-                        <div className="flex justify-between" style={{ color: "#8A8271" }}>
-                          <span>dont congés payés inclus dans la base</span>
-                          <span>
-                            {conges.jours} j ({fmtHours(conges.heures)})
-                          </span>
-                        </div>
+                        <>
+                          <div className="flex justify-between" style={{ color: "#8A8271" }}>
+                            <span>dont congés payés inclus dans la base</span>
+                            <span>
+                              {conges.jours} j ({fmtHours(conges.heures)})
+                            </span>
+                          </div>
+                          <div className="pl-3" style={{ color: "#8A8271" }}>
+                            {conges.datesConges.map((d) => fmtDateLong(d)).join(" · ")}
+                          </div>
+                        </>
                       )}
                       {heuresExcedent > 0 && (
                         <div className="flex justify-between">
@@ -3833,25 +3923,32 @@ function Absences({ employees, entries }) {
 
   const filtered = entries.filter((e) => e.date >= start && e.date <= end);
 
-  // Jours où au moins un pointage a été fait (pour ne pas compter les jours non travaillés), hors week-ends
+  // Jours où au moins un pointage a été fait (pour ne pas compter les jours non travaillés) — le
+  // samedi est inclus (jour ouvrable comme partout ailleurs dans l'appli), seul le dimanche et les
+  // jours fériés sont exclus.
   const joursPointes = useMemo(() => {
     const set = new Set(filtered.map((e) => e.date));
     return Array.from(set)
-      .filter((d) => !isWeekend(d) && !isJourFerie(d))
+      .filter((d) => new Date(d + "T00:00:00").getDay() !== 0 && !isJourFerie(d))
       .sort();
   }, [filtered]);
 
-  // Pour chaque salarié : liste des jours pointés où il n'était pas présent
+  // Pour chaque salarié : liste des jours où il n'était pas présent. Lundi-vendredi : si le jour a
+  // été pointé pour d'autres salariés mais pas pour lui, c'est probablement un oubli → signalé
+  // « Non pointé ». Le samedi n'étant pas systématique, on ne signale QUE les absences explicitement
+  // déclarées (une entrée existe réellement, congé payé auto-généré depuis le vendredi inclus) —
+  // jamais une absence déduite du simple fait qu'il n'a pas de pointage ce jour-là.
   const absences = useMemo(() => {
     const byEmp = {};
     employees.forEach((emp) => {
       const list = [];
       joursPointes.forEach((date) => {
+        const estSamedi = new Date(date + "T00:00:00").getDay() === 6;
         const entry = filtered.find((e) => e.date === date && e.employeeId === emp.id);
         const present = entry ? entry.present : false;
-        if (!present) {
-          list.push({ date, motif: entry?.motif || "Non pointé" });
-        }
+        if (present) return;
+        if (estSamedi && !entry) return; // samedi sans aucune entrée : pas d'absence déduite
+        list.push({ date, motif: entry?.motif || "Non pointé" });
       });
       byEmp[emp.id] = list;
     });
@@ -3980,7 +4077,7 @@ function CongesAbsences({ employees, updateEmployees, entries, updateEntries, ta
     if (!employeeId && employees.length > 0) setEmployeeId(employees[0].id);
   }, [employees, employeeId]);
 
-  // Liste des dates (jours ouvrés, hors week-ends) entre début et fin inclus
+  // Liste des dates en jours ouvrables (lundi-samedi, hors dimanche et jours fériés) entre début et fin inclus
   const datesRange = (d1, d2) => {
     const dates = [];
     let cur = new Date(d1 + "T00:00:00");
@@ -3998,7 +4095,7 @@ function CongesAbsences({ employees, updateEmployees, entries, updateEntries, ta
     if (!employeeId || !debut || !fin || debut > fin) return;
     const dates = datesRange(debut, fin);
     if (dates.length === 0) {
-      setMsg("Aucun jour ouvré dans cette plage (uniquement des week-ends).");
+      setMsg("Aucun jour ouvrable dans cette plage (uniquement des dimanches ou jours fériés).");
       return;
     }
     // Retire toutes les entrées existantes de ce salarié sur ces dates (postes ou absence), puis pose l'absence
@@ -4226,7 +4323,7 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
   const joursPointes = Array.from(
     new Set(entries.filter((e) => e.date >= start && e.date <= end).map((e) => e.date))
   )
-    .filter((d) => !isWeekend(d) && !isJourFerie(d))
+    .filter((d) => new Date(d + "T00:00:00").getDay() !== 0 && !isJourFerie(d))
     .sort();
 
   const entriesEmp = entries.filter((e) => e.employeeId === employeeId && e.date >= start && e.date <= end);
@@ -4263,10 +4360,16 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
   });
   const parTache = Object.entries(parTacheMap).sort((a, b) => b[1].paye - a[1].paye);
 
+  // Lundi-vendredi : absence déduite si le jour est pointé pour d'autres mais pas pour lui. Le
+  // samedi n'étant pas systématique, on ne retient que les absences explicitement déclarées (une
+  // entrée existe réellement) — jamais une absence déduite de la simple absence de pointage.
   const absences = joursPointes
     .filter((date) => {
       const entry = entries.find((e) => e.date === date && e.employeeId === employeeId);
-      return !(entry && entry.present);
+      if (entry && entry.present) return false;
+      const estSamedi = new Date(date + "T00:00:00").getDay() === 6;
+      if (estSamedi && !entry) return false;
+      return true;
     })
     .map((date) => {
       const entry = entries.find((e) => e.date === date && e.employeeId === employeeId);
@@ -4281,9 +4384,9 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
   const r = Number(emp?.tauxHoraire) || 0;
   const mensualise = heuresSup.mode === "mensualise";
   const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
-  const { joursAbsenceNonPayee, retenueHeures } = mensualise
+  const { joursAbsenceNonPayee, retenueHeures, datesAbsenceNonPayee } = mensualise
     ? absenceRetenueInfo(emp, entries, start, end, heuresDefaut)
-    : { joursAbsenceNonPayee: 0, retenueHeures: 0 };
+    : { joursAbsenceNonPayee: 0, retenueHeures: 0, datesAbsenceNonPayee: [] };
   const baseNominale = mensualise ? baseNominaleProratisee(emp, start, end, heuresSup.heuresBaseMensualisee) : 0;
   const baseAjustee = mensualise ? Math.max(0, baseNominale - retenueHeures) : 0;
   // En mode mensualisé, les congés payés comptent comme des heures normales dans la base (voir la
@@ -4300,15 +4403,16 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
     : 0;
   const primesPeriode = primes.filter((p) => p.employeeId === employeeId && p.date >= start && p.date <= end);
   const primesMontant = primesPeriode.reduce((s, p) => s + p.montant, 0);
-  // Les primes sont soumises aux cotisations comme le salaire normal (les congés payés le sont
-  // aussi mais sont déjà inclus dans "brut" en mode mensualisé — ou ajoutés ci-dessous sinon)
-  const cotisations = (brut + (mensualise ? 0 : conges.montant) + primesMontant) * (Number(tauxCotisations) / 100);
+  // Les primes sont soumises aux cotisations comme le salaire normal. Les congés payés le sont
+  // aussi, mais sont déjà inclus dans "brut" (dans les deux branches ci-dessus) — ne pas les
+  // rajouter ici, sinon ils seraient comptés deux fois dans le net.
+  const cotisations = (brut + primesMontant) * (Number(tauxCotisations) / 100);
   const avancesPeriode = mouvementsPeriode.filter((t) => t.type === "avance").reduce((s, t) => s + t.montant, 0);
   const acomptesPeriode = mouvementsPeriode.filter((t) => t.type === "acompte").reduce((s, t) => s + t.montant, 0);
   const remboursementsPeriode = mouvementsPeriode.filter((t) => t.type === "remboursement").reduce((s, t) => s + t.montant, 0);
   const loyerPeriode = loyerPourPeriode(emp, start, end);
   const deductionsPeriode = avancesPeriode + acomptesPeriode + remboursementsPeriode + loyerPeriode;
-  const net = brut - cotisations - deductionsPeriode + primesMontant + (mensualise ? 0 : conges.montant);
+  const net = brut - cotisations - deductionsPeriode + primesMontant;
 
   return {
     presences,
@@ -4319,6 +4423,7 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
     heuresBase,
     heuresExcedent,
     joursAbsenceNonPayee,
+    datesAbsenceNonPayee,
     retenueHeures,
     parTache,
     absences,
@@ -4350,6 +4455,7 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
     heuresBase,
     heuresExcedent,
     joursAbsenceNonPayee,
+    datesAbsenceNonPayee,
     retenueHeures,
     parTache,
     absences,
@@ -4527,20 +4633,30 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
                   </div>
                 )}
                 {retenueHeures > 0 && (
-                  <div className="flex justify-between" style={{ color: PALETTE.rust }}>
-                    <span>
-                      − Absence non payée ({joursAbsenceNonPayee} j{joursAbsenceNonPayee > 1 ? "ours" : "our"})
-                    </span>
-                    <span>{fmtHours(retenueHeures)}</span>
-                  </div>
+                  <>
+                    <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                      <span>
+                        − Absence non payée ({joursAbsenceNonPayee} j{joursAbsenceNonPayee > 1 ? "ours" : "our"})
+                      </span>
+                      <span>{fmtHours(retenueHeures)}</span>
+                    </div>
+                    <div className="pl-3" style={{ color: "#8A8271" }}>
+                      {datesAbsenceNonPayee.map((a) => `${fmtDateLong(a.date)} (${a.motif})`).join(" · ")}
+                    </div>
+                  </>
                 )}
                 {conges.jours > 0 && (
-                  <div className="flex justify-between" style={{ color: "#8A8271" }}>
-                    <span>dont congés payés inclus dans la base</span>
-                    <span>
-                      {conges.jours} j ({fmtHours(conges.heures)})
-                    </span>
-                  </div>
+                  <>
+                    <div className="flex justify-between" style={{ color: "#8A8271" }}>
+                      <span>dont congés payés inclus dans la base</span>
+                      <span>
+                        {conges.jours} j ({fmtHours(conges.heures)})
+                      </span>
+                    </div>
+                    <div className="pl-3" style={{ color: "#8A8271" }}>
+                      {conges.datesConges.map((d) => fmtDateLong(d)).join(" · ")}
+                    </div>
+                  </>
                 )}
                 {heuresExcedent > 0 && (
                   <div className="flex justify-between">
@@ -4942,9 +5058,11 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
     const primesMois = primes
       .filter((p) => p.employeeId === emp.id && p.date >= monthStart && p.date <= monthEnd)
       .reduce((s, p) => s + p.montant, 0);
-    const net = brut - (brut + (mensualiseD ? 0 : congesMois.montant) + primesMois) * (Number(tauxCotisations) / 100);
+    // Les congés payés sont déjà inclus dans "brut" (dans les deux branches ci-dessus) — ne pas les
+    // rajouter ici, sinon ils seraient comptés deux fois.
+    const net = brut - (brut + primesMois) * (Number(tauxCotisations) / 100);
     const loyerMois = loyerPourPeriode(emp, monthStart, monthEnd);
-    masseSalariale += net + primesMois - loyerMois + (mensualiseD ? 0 : congesMois.montant);
+    masseSalariale += net + primesMois - loyerMois;
     heuresMajo1Total += b.majo1;
     heuresMajo2Total += b.majo2;
   });
@@ -4953,17 +5071,22 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
     .filter((t) => (t.type === "avance" || t.type === "acompte") && txDeductionDate(t) >= monthStart && txDeductionDate(t) <= monthEnd)
     .reduce((s, t) => s + t.montant, 0);
 
-  // Absences du mois (jours ouvrés pointés hors week-end/fériés où le salarié n'était pas présent)
+  // Absences du mois (jours ouvrables pointés, hors dimanche/fériés, où le salarié n'était pas présent)
   const joursPointesMois = useMemo(() => {
     const set = new Set(entries.filter((e) => e.date >= monthStart && e.date <= monthEnd).map((e) => e.date));
-    return Array.from(set).filter((d) => !isWeekend(d) && !isJourFerie(d));
+    return Array.from(set).filter((d) => new Date(d + "T00:00:00").getDay() !== 0 && !isJourFerie(d));
   }, [entries, monthStart, monthEnd]);
 
+  // Lundi-vendredi : absence déduite si non pointé. Samedi : uniquement si une entrée d'absence
+  // existe réellement (pas systématique, ne pas déduire une absence de la simple absence de pointage).
   let absencesMois = 0;
   employees.forEach((emp) => {
     joursPointesMois.forEach((date) => {
       const entry = entries.find((e) => e.date === date && e.employeeId === emp.id);
-      if (!(entry && entry.present)) absencesMois += 1;
+      if (entry && entry.present) return;
+      const estSamedi = new Date(date + "T00:00:00").getDay() === 6;
+      if (estSamedi && !entry) return;
+      absencesMois += 1;
     });
   });
 
@@ -5079,7 +5202,12 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
             majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
             majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
           : 0;
-        total += brut - brut * (Number(tauxCotisations) / 100);
+        const primesC = primes
+          .filter((p) => p.employeeId === emp.id && p.date >= mStart && p.date <= mEnd)
+          .reduce((s, p) => s + p.montant, 0);
+        const loyerC = loyerPourPeriode(emp, mStart, mEnd);
+        const net = brut - (brut + primesC) * (Number(tauxCotisations) / 100);
+        total += net + primesC - loyerC;
       });
       months.push({ label: d.toLocaleDateString("fr-FR", { month: "short" }), value: Math.round(total) });
     }
@@ -5139,7 +5267,7 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
         </div>
         <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-3">
           <div className="text-xs" style={{ color: "#8A8271" }}>
-            Absences (jours ouvrés)
+            Absences (jours ouvrables)
           </div>
           <div className="text-lg font-bold" style={{ color: PALETTE.ink }}>
             {absencesMois}
@@ -6104,22 +6232,32 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
                   </div>
                 )}
                 {data.retenueHeures > 0 && (
-                  <div className="flex justify-between" style={{ color: PALETTE.rust }}>
-                    <span>Absences ({data.joursAbsenceNonPayee} j)</span>
-                    <span className="flex gap-3">
-                      <span>− {fmtHours(data.retenueHeures)}</span>
-                      <strong className="w-20 text-right">{montantAbsence !== null ? `− ${fmtEuros(montantAbsence)}` : "—"}</strong>
-                    </span>
-                  </div>
+                  <>
+                    <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                      <span>Absences ({data.joursAbsenceNonPayee} j)</span>
+                      <span className="flex gap-3">
+                        <span>− {fmtHours(data.retenueHeures)}</span>
+                        <strong className="w-20 text-right">{montantAbsence !== null ? `− ${fmtEuros(montantAbsence)}` : "—"}</strong>
+                      </span>
+                    </div>
+                    <div className="pl-3 text-xs" style={{ color: "#8A8271" }}>
+                      {data.datesAbsenceNonPayee.map((a) => `${fmtDateLong(a.date)} (${a.motif})`).join(" · ")}
+                    </div>
+                  </>
                 )}
                 {data.conges.jours > 0 && (
-                  <div className="flex justify-between" style={{ color: "#8A8271" }}>
-                    <span>dont congés payés ({data.conges.jours} j)</span>
-                    <span className="flex gap-3">
-                      <span>{fmtHours(data.conges.heures)}</span>
-                      <span className="w-20 text-right italic">inclus</span>
-                    </span>
-                  </div>
+                  <>
+                    <div className="flex justify-between" style={{ color: "#8A8271" }}>
+                      <span>dont congés payés ({data.conges.jours} j)</span>
+                      <span className="flex gap-3">
+                        <span>{fmtHours(data.conges.heures)}</span>
+                        <span className="w-20 text-right italic">inclus</span>
+                      </span>
+                    </div>
+                    <div className="pl-3 text-xs" style={{ color: "#8A8271" }}>
+                      {data.conges.datesConges.map((d) => fmtDateLong(d)).join(" · ")}
+                    </div>
+                  </>
                 )}
                 <div className="flex justify-between">
                   <span>Heures normales 100%</span>
