@@ -393,6 +393,43 @@ const addMonthsClamped = (dateStr, n) => {
 // Compte les échéances mensuelles réelles (une par mois à partir de la date de début), peu importe
 // si la période chevauche deux mois civils — pas un simple compte de mois calendaires touchés.
 // S'arrête tout seul : fin de contrat dépassée, champ vidé, ou salarié supprimé.
+// Calcule le montant total des primes dues à un salarié sur une période : les primes ponctuelles
+// comptent si leur date tombe dans la période, les primes mensuelles récurrentes comptent une fois
+// par échéance mensuelle réelle depuis leur date de début (même logique que le loyer automatique),
+// jusqu'à leur date de fin le cas échéant.
+const primesPourPeriode = (primes, employeeId, start, end) => {
+  let total = 0;
+  const primesPeriode = [];
+  primes
+    .filter((p) => p.employeeId === employeeId)
+    .forEach((p) => {
+      if (!p.recurrente) {
+        if (p.date >= start && p.date <= end) {
+          total += p.montant;
+          primesPeriode.push(p);
+        }
+        return;
+      }
+      const debut = p.dateDebut || p.date;
+      if (!debut) return;
+      const effectiveEnd = p.dateFin && p.dateFin < end ? p.dateFin : end;
+      if (debut > effectiveEnd) return;
+      let n = 0;
+      let due = debut;
+      let garde = 0;
+      while (due <= effectiveEnd && garde < 1200) {
+        if (due >= start) {
+          total += p.montant;
+          primesPeriode.push({ ...p, date: due });
+        }
+        n++;
+        due = addMonthsClamped(debut, n);
+        garde++;
+      }
+    });
+  return { total, primesPeriode };
+};
+
 const loyerPourPeriode = (emp, start, end) => {
   const montant = Number(emp.loyerMensuel);
   if (!(montant > 0) || !emp.loyerDebut) return 0;
@@ -2551,6 +2588,8 @@ function Primes({ employees, primes, updatePrimes, primeTypes, updatePrimeTypes 
   const [type, setType] = useState(primeTypes[0]);
   const [montant, setMontant] = useState("");
   const [date, setDate] = useState(todayISO());
+  const [recurrente, setRecurrente] = useState(false);
+  const [dateFin, setDateFin] = useState("");
   const [note, setNote] = useState("");
   const [filterEmp, setFilterEmp] = useState("all");
   const [nouveauType, setNouveauType] = useState("");
@@ -2568,10 +2607,19 @@ function Primes({ employees, primes, updatePrimes, primeTypes, updatePrimeTypes 
     if (!employeeId || !montant || Number(montant) <= 0) return;
     updatePrimes([
       ...primes,
-      { id: uid(), employeeId, type, montant: Number(montant), date, note: note.trim() },
+      {
+        id: uid(),
+        employeeId,
+        type,
+        montant: Number(montant),
+        date,
+        note: note.trim(),
+        ...(recurrente ? { recurrente: true, dateDebut: date, ...(dateFin ? { dateFin } : {}) } : {}),
+      },
     ]);
     setMontant("");
     setNote("");
+    setDateFin("");
   };
 
   const removePrime = (id) => {
@@ -2663,13 +2711,41 @@ function Primes({ employees, primes, updatePrimes, primeTypes, updatePrimeTypes 
             className="px-3 py-2 rounded border text-sm w-32"
             style={{ borderColor: PALETTE.line }}
           />
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
+          <select
+            value={recurrente ? "recurrente" : "ponctuelle"}
+            onChange={(e) => setRecurrente(e.target.value === "recurrente")}
             className="px-2 py-2 rounded border text-sm"
             style={{ borderColor: PALETTE.line }}
-          />
+          >
+            <option value="ponctuelle">Ponctuelle</option>
+            <option value="recurrente">Mensuelle récurrente</option>
+          </select>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+              {recurrente ? "Depuis le" : "Date"}
+            </label>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="px-2 py-2 rounded border text-sm"
+              style={{ borderColor: PALETTE.line }}
+            />
+          </div>
+          {recurrente && (
+            <div>
+              <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+                Jusqu'au (optionnel)
+              </label>
+              <input
+                type="date"
+                value={dateFin}
+                onChange={(e) => setDateFin(e.target.value)}
+                className="px-2 py-2 rounded border text-sm"
+                style={{ borderColor: PALETTE.line }}
+              />
+            </div>
+          )}
           <input
             type="text"
             placeholder="Note (optionnel)"
@@ -2687,8 +2763,9 @@ function Primes({ employees, primes, updatePrimes, primeTypes, updatePrimeTypes 
           </button>
         </div>
         <p className="text-xs mt-2" style={{ color: "#8A8271" }}>
-          Les primes sont ajoutées au net estimé dans Simulation paie et Synthèse salarié pour la période où elles
-          sont enregistrées.
+          {recurrente
+            ? "Cette prime sera automatiquement comptée chaque mois à partir de la date choisie, sans avoir à la ressaisir."
+            : "Les primes sont ajoutées au net estimé dans Simulation paie et Synthèse salarié pour la période où elles sont enregistrées."}
         </p>
         <button
           onClick={() => setShowTypeManager((v) => !v)}
@@ -2735,6 +2812,10 @@ function Primes({ employees, primes, updatePrimes, primeTypes, updatePrimeTypes 
       </div>
 
       <h3 className="font-semibold mb-2">Total par salarié</h3>
+      <p className="text-xs mb-2" style={{ color: "#8A8271" }}>
+        Une prime mensuelle récurrente compte ici pour son montant mensuel une seule fois (pas le cumul sur
+        plusieurs mois) — elle est appliquée automatiquement chaque mois dans Simulation paie et Synthèse salarié.
+      </p>
       <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden mb-6">
         {employees.map((emp, i) => {
           const total = totalParEmp[emp.id];
@@ -2799,6 +2880,12 @@ function Primes({ employees, primes, updatePrimes, primeTypes, updatePrimeTypes 
                 <span className="font-medium">{emp?.nom || "?"}</span>{" "}
                 <span style={{ color: "#8A8271" }}>
                   · {p.type} · {p.date}
+                  {p.recurrente && (
+                    <span style={{ color: PALETTE.green }}>
+                      {" "}
+                      · mensuelle récurrente{p.dateFin ? ` jusqu'au ${p.dateFin}` : ""}
+                    </span>
+                  )}
                   {p.note ? ` · ${p.note}` : ""}
                 </span>
               </div>
@@ -3572,16 +3659,14 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
     return byEmp;
   }, [transactions, start, end]);
 
-  // Primes de la période, par salarié
+  // Primes de la période, par salarié (ponctuelles + mensuelles récurrentes)
   const primesParEmp = useMemo(() => {
     const byEmp = {};
-    primes
-      .filter((p) => p.date >= start && p.date <= end)
-      .forEach((p) => {
-        byEmp[p.employeeId] = (byEmp[p.employeeId] || 0) + p.montant;
-      });
+    employees.forEach((emp) => {
+      byEmp[emp.id] = primesPourPeriode(primes, emp.id, start, end).total;
+    });
     return byEmp;
-  }, [primes, start, end]);
+  }, [primes, employees, start, end]);
 
   const rate = (emp) => Number(emp.tauxHoraire) || 0;
 
@@ -4401,8 +4486,7 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
       heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
       heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
     : 0;
-  const primesPeriode = primes.filter((p) => p.employeeId === employeeId && p.date >= start && p.date <= end);
-  const primesMontant = primesPeriode.reduce((s, p) => s + p.montant, 0);
+  const { total: primesMontant, primesPeriode } = primesPourPeriode(primes, employeeId, start, end);
   // Les primes sont soumises aux cotisations comme le salaire normal. Les congés payés le sont
   // aussi, mais sont déjà inclus dans "brut" (dans les deux branches ci-dessus) — ne pas les
   // rajouter ici, sinon ils seraient comptés deux fois dans le net.
@@ -5055,9 +5139,7 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
         b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
         b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
       : 0;
-    const primesMois = primes
-      .filter((p) => p.employeeId === emp.id && p.date >= monthStart && p.date <= monthEnd)
-      .reduce((s, p) => s + p.montant, 0);
+    const primesMois = primesPourPeriode(primes, emp.id, monthStart, monthEnd).total;
     // Les congés payés sont déjà inclus dans "brut" (dans les deux branches ci-dessus) — ne pas les
     // rajouter ici, sinon ils seraient comptés deux fois.
     const net = brut - (brut + primesMois) * (Number(tauxCotisations) / 100);
@@ -5202,9 +5284,7 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
             majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
             majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
           : 0;
-        const primesC = primes
-          .filter((p) => p.employeeId === emp.id && p.date >= mStart && p.date <= mEnd)
-          .reduce((s, p) => s + p.montant, 0);
+        const primesC = primesPourPeriode(primes, emp.id, mStart, mEnd).total;
         const loyerC = loyerPourPeriode(emp, mStart, mEnd);
         const net = brut - (brut + primesC) * (Number(tauxCotisations) / 100);
         total += net + primesC - loyerC;
@@ -5212,7 +5292,7 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
       months.push({ label: d.toLocaleDateString("fr-FR", { month: "short" }), value: Math.round(total) });
     }
     return months;
-  }, [entries, employees, heuresSup, tauxCotisations, now.getFullYear(), now.getMonth()]);
+  }, [entries, employees, heuresSup, tauxCotisations, primes, now.getFullYear(), now.getMonth()]);
 
   // Répartition des heures par tâche ce mois-ci (pour le camembert)
   const heuresParTache = useMemo(() => {
